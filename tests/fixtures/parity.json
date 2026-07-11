@@ -1,0 +1,1739 @@
+{
+ "meta": {
+  "now_s": 1760000000.0,
+  "now_mono": 50000.0,
+  "generated_by": "scripts/gen_parity_fixtures.py"
+ },
+ "obs_cases": [
+  {
+   "name": "basic_flat",
+   "yes": [
+    [
+     0.4,
+     50
+    ],
+    [
+     0.39,
+     30
+    ],
+    [
+     0.38,
+     10
+    ]
+   ],
+   "no": [
+    [
+     0.58,
+     40
+    ],
+    [
+     0.57,
+     20
+    ],
+    [
+     0.56,
+     5
+    ]
+   ],
+   "expected_obs": [
+    0.4099999964237213,
+    0.019999999552965164,
+    0.5,
+    0.4000000059604645,
+    0.30000001192092896,
+    0.20000000298023224,
+    0.10000000149011612,
+    0.05000000074505806,
+    0.16129031777381897,
+    0.0,
+    0.0,
+    0.0,
+    3.2188758850097656,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "post_mid_history": [
+    0.41000000000000003
+   ]
+  },
+  {
+   "name": "long_with_entry",
+   "yes": [
+    [
+     0.62,
+     120
+    ],
+    [
+     0.61,
+     4
+    ]
+   ],
+   "no": [
+    [
+     0.35,
+     80
+    ]
+   ],
+   "position": 5,
+   "entry_price": 0.58,
+   "fills_buy": 7,
+   "fills_sell": 2,
+   "expected_obs": [
+    0.6349999904632568,
+    0.029999999329447746,
+    1.0,
+    0.800000011920929,
+    0.03999999910593033,
+    0.05000000074505806,
+    0.019999999552965164,
+    0.019999999552965164,
+    0.21568627655506134,
+    0.0,
+    0.25,
+    0.027499999850988388,
+    3.2188758850097656,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    0.5555555820465088,
+    0.0
+   ],
+   "post_mid_history": [
+    0.635
+   ]
+  },
+  {
+   "name": "short_with_entry",
+   "yes": [
+    [
+     0.22,
+     9
+    ]
+   ],
+   "no": [
+    [
+     0.75,
+     200
+    ],
+    [
+     0.74,
+     15
+    ]
+   ],
+   "position": -3,
+   "entry_price": 0.27,
+   "fills_buy": 1,
+   "fills_sell": 4,
+   "expected_obs": [
+    0.23499999940395355,
+    0.029999999329447746,
+    0.09000000357627869,
+    1.0,
+    0.05000000074505806,
+    0.15000000596046448,
+    0.019999999552965164,
+    0.019999999552965164,
+    -0.9196428656578064,
+    0.0,
+    -0.15000000596046448,
+    0.010499999858438969,
+    3.2188758850097656,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    -0.6000000238418579,
+    0.0
+   ],
+   "post_mid_history": [
+    0.235
+   ]
+  },
+  {
+   "name": "one_sided_book",
+   "yes": [
+    [
+     0.4,
+     50
+    ]
+   ],
+   "no": [],
+   "expected_obs": null,
+   "post_mid_history": []
+  },
+  {
+   "name": "wide_spread_skip",
+   "yes": [
+    [
+     0.1,
+     10
+    ]
+   ],
+   "no": [
+    [
+     0.3,
+     10
+    ]
+   ],
+   "expected_obs": null,
+   "post_mid_history": []
+  },
+  {
+   "name": "high_vol_skip",
+   "yes": [
+    [
+     0.4,
+     50
+    ]
+   ],
+   "no": [
+    [
+     0.58,
+     40
+    ]
+   ],
+   "mid_history": [
+    0.3,
+    0.5,
+    0.3,
+    0.5,
+    0.3,
+    0.5,
+    0.3,
+    0.5,
+    0.3,
+    0.5,
+    0.3,
+    0.5,
+    0.3,
+    0.5,
+    0.3,
+    0.5,
+    0.3,
+    0.5,
+    0.3,
+    0.5
+   ],
+   "last_mid_sample": 50000.0,
+   "expected_obs": null,
+   "post_mid_history": [
+    0.3,
+    0.5,
+    0.3,
+    0.5,
+    0.3,
+    0.5,
+    0.3,
+    0.5,
+    0.3,
+    0.5,
+    0.3,
+    0.5,
+    0.3,
+    0.5,
+    0.3,
+    0.5,
+    0.3,
+    0.5,
+    0.3,
+    0.41000000000000003
+   ]
+  },
+  {
+   "name": "subpenny_book",
+   "yes": [
+    [
+     0.401,
+     12.5
+    ],
+    [
+     0.4,
+     3
+    ]
+   ],
+   "no": [
+    [
+     0.585,
+     7
+    ]
+   ],
+   "expected_obs": [
+    0.40799999237060547,
+    0.014000000432133675,
+    0.125,
+    0.07000000029802322,
+    0.029999999329447746,
+    0.05000000074505806,
+    0.019999999552965164,
+    0.019999999552965164,
+    0.3777777850627899,
+    0.0,
+    0.0,
+    0.0,
+    3.2188758850097656,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "post_mid_history": [
+    0.40800000000000003
+   ]
+  },
+  {
+   "name": "trade_window_flow",
+   "yes": [
+    [
+     0.5,
+     60
+    ]
+   ],
+   "no": [
+    [
+     0.48,
+     55
+    ]
+   ],
+   "recent_trades": [
+    [
+     1759999950.0,
+     10,
+     "no"
+    ],
+    [
+     1759999960.0,
+     4,
+     "yes"
+    ],
+    [
+     1759999910.0,
+     99,
+     "no"
+    ]
+   ],
+   "expected_obs": [
+    0.5099999904632568,
+    0.019999999552965164,
+    0.6000000238418579,
+    0.550000011920929,
+    0.05000000074505806,
+    0.05000000074505806,
+    0.019999999552965164,
+    0.019999999552965164,
+    0.043478261679410934,
+    0.05999999865889549,
+    0.0,
+    0.0,
+    3.2188758850097656,
+    0.0,
+    0.0,
+    0.0,
+    0.9292035102844238,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "post_mid_history": [
+    0.51
+   ]
+  },
+  {
+   "name": "momentum_velocity",
+   "yes": [
+    [
+     0.44,
+     20
+    ]
+   ],
+   "no": [
+    [
+     0.54,
+     25
+    ]
+   ],
+   "mid_history": [
+    0.3,
+    0.32,
+    0.34,
+    0.36,
+    0.38,
+    0.4
+   ],
+   "last_mid_sample": 50000.0,
+   "expected_obs": [
+    0.44999998807907104,
+    0.019999999552965164,
+    0.20000000298023224,
+    0.25,
+    0.05000000074505806,
+    0.05000000074505806,
+    0.019999999552965164,
+    0.019999999552965164,
+    -0.1111111119389534,
+    0.0,
+    0.0,
+    0.0,
+    3.2188758850097656,
+    0.10000000149011612,
+    0.0,
+    0.0,
+    0.0,
+    0.029999999329447746,
+    0.0,
+    0.9689627885818481
+   ],
+   "post_mid_history": [
+    0.3,
+    0.32,
+    0.34,
+    0.36,
+    0.38,
+    0.45
+   ]
+  },
+  {
+   "name": "crossed_book",
+   "yes": [
+    [
+     0.5,
+     5
+    ]
+   ],
+   "no": [
+    [
+     0.55,
+     5
+    ]
+   ],
+   "expected_obs": null,
+   "post_mid_history": []
+  },
+  {
+   "name": "low_band_mid",
+   "yes": [
+    [
+     0.05,
+     30
+    ]
+   ],
+   "no": [
+    [
+     0.93,
+     40
+    ]
+   ],
+   "expected_obs": [
+    0.05999999865889549,
+    0.019999999552965164,
+    0.30000001192092896,
+    0.4000000059604645,
+    0.05000000074505806,
+    0.05000000074505806,
+    0.019999999552965164,
+    0.019999999552965164,
+    -0.1428571492433548,
+    0.0,
+    0.0,
+    0.0,
+    3.2188758850097656,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "post_mid_history": [
+    0.060000000000000005
+   ]
+  },
+  {
+   "name": "clipped_norms",
+   "yes": [
+    [
+     0.4,
+     500
+    ]
+   ],
+   "no": [
+    [
+     0.58,
+     400
+    ]
+   ],
+   "realized_pnl": 500.0,
+   "fills_buy": 99,
+   "expected_obs": [
+    0.4099999964237213,
+    0.019999999552965164,
+    1.0,
+    1.0,
+    0.05000000074505806,
+    0.05000000074505806,
+    0.019999999552965164,
+    0.019999999552965164,
+    0.1111111119389534,
+    0.0,
+    0.0,
+    0.0,
+    3.2188758850097656,
+    0.0,
+    1.0,
+    1.0,
+    0.0,
+    0.0,
+    1.0,
+    0.0
+   ],
+   "post_mid_history": [
+    0.41000000000000003
+   ]
+  }
+ ],
+ "action_cases": [
+  {
+   "model": "realistic_20dim_KXAAAGASM_final",
+   "obs_case": "basic_flat",
+   "expected_action": [
+    -1.0,
+    -1.0
+   ]
+  },
+  {
+   "model": "realistic_20dim_KXAAAGASM_final",
+   "obs_case": "long_with_entry",
+   "expected_action": [
+    0.4863951802253723,
+    0.7211624979972839
+   ]
+  },
+  {
+   "model": "realistic_20dim_KXAAAGASM_final",
+   "obs_case": "short_with_entry",
+   "expected_action": [
+    -1.0,
+    -1.0
+   ]
+  },
+  {
+   "model": "realistic_20dim_KXAAAGASM_final",
+   "obs_case": "subpenny_book",
+   "expected_action": [
+    -1.0,
+    -1.0
+   ]
+  },
+  {
+   "model": "realistic_20dim_KXAAAGASM_final",
+   "obs_case": "trade_window_flow",
+   "expected_action": [
+    -1.0,
+    -1.0
+   ]
+  },
+  {
+   "model": "realistic_20dim_KXAAAGASM_final",
+   "obs_case": "momentum_velocity",
+   "expected_action": [
+    -0.6447024941444397,
+    -1.0
+   ]
+  },
+  {
+   "model": "realistic_20dim_KXAAAGASM_final",
+   "obs_case": "low_band_mid",
+   "expected_action": [
+    -1.0,
+    -1.0
+   ]
+  },
+  {
+   "model": "realistic_20dim_KXAAAGASM_final",
+   "obs_case": "clipped_norms",
+   "expected_action": [
+    -0.07706877589225769,
+    0.540910542011261
+   ]
+  },
+  {
+   "model": "realistic_20dim_KXADP_final",
+   "obs_case": "basic_flat",
+   "expected_action": [
+    -1.0,
+    -1.0
+   ]
+  },
+  {
+   "model": "realistic_20dim_KXADP_final",
+   "obs_case": "long_with_entry",
+   "expected_action": [
+    -0.7447925806045532,
+    1.0
+   ]
+  },
+  {
+   "model": "realistic_20dim_KXADP_final",
+   "obs_case": "short_with_entry",
+   "expected_action": [
+    -1.0,
+    -1.0
+   ]
+  },
+  {
+   "model": "realistic_20dim_KXADP_final",
+   "obs_case": "subpenny_book",
+   "expected_action": [
+    -1.0,
+    -1.0
+   ]
+  },
+  {
+   "model": "realistic_20dim_KXADP_final",
+   "obs_case": "trade_window_flow",
+   "expected_action": [
+    -1.0,
+    0.13789141178131104
+   ]
+  },
+  {
+   "model": "realistic_20dim_KXADP_final",
+   "obs_case": "momentum_velocity",
+   "expected_action": [
+    0.06750655174255371,
+    1.0
+   ]
+  },
+  {
+   "model": "realistic_20dim_KXADP_final",
+   "obs_case": "low_band_mid",
+   "expected_action": [
+    -1.0,
+    -1.0
+   ]
+  },
+  {
+   "model": "realistic_20dim_KXADP_final",
+   "obs_case": "clipped_norms",
+   "expected_action": [
+    -0.7316892147064209,
+    1.0
+   ]
+  },
+  {
+   "model": "realistic_20dim_KXBTCD_final",
+   "obs_case": "basic_flat",
+   "expected_action": [
+    -1.0,
+    -1.0
+   ]
+  },
+  {
+   "model": "realistic_20dim_KXBTCD_final",
+   "obs_case": "long_with_entry",
+   "expected_action": [
+    0.9076186418533325,
+    -0.8455489873886108
+   ]
+  },
+  {
+   "model": "realistic_20dim_KXBTCD_final",
+   "obs_case": "short_with_entry",
+   "expected_action": [
+    -1.0,
+    -1.0
+   ]
+  },
+  {
+   "model": "realistic_20dim_KXBTCD_final",
+   "obs_case": "subpenny_book",
+   "expected_action": [
+    -0.9497843384742737,
+    -0.6673412919044495
+   ]
+  },
+  {
+   "model": "realistic_20dim_KXBTCD_final",
+   "obs_case": "trade_window_flow",
+   "expected_action": [
+    -0.46420764923095703,
+    -0.9629399180412292
+   ]
+  },
+  {
+   "model": "realistic_20dim_KXBTCD_final",
+   "obs_case": "momentum_velocity",
+   "expected_action": [
+    -0.9855032563209534,
+    -0.9746640920639038
+   ]
+  },
+  {
+   "model": "realistic_20dim_KXBTCD_final",
+   "obs_case": "low_band_mid",
+   "expected_action": [
+    -1.0,
+    -1.0
+   ]
+  },
+  {
+   "model": "realistic_20dim_KXBTCD_final",
+   "obs_case": "clipped_norms",
+   "expected_action": [
+    -0.04771832749247551,
+    -0.9173307418823242
+   ]
+  }
+ ],
+ "fee_cases": [
+  {
+   "kind": "maker",
+   "rate": 0.0175,
+   "contracts": 1,
+   "price": 0.05,
+   "expected": 0.01
+  },
+  {
+   "kind": "maker",
+   "rate": 0.0175,
+   "contracts": 1,
+   "price": 0.27,
+   "expected": 0.01
+  },
+  {
+   "kind": "maker",
+   "rate": 0.0175,
+   "contracts": 1,
+   "price": 0.4,
+   "expected": 0.01
+  },
+  {
+   "kind": "maker",
+   "rate": 0.0175,
+   "contracts": 1,
+   "price": 0.5,
+   "expected": 0.01
+  },
+  {
+   "kind": "maker",
+   "rate": 0.0175,
+   "contracts": 1,
+   "price": 0.73,
+   "expected": 0.01
+  },
+  {
+   "kind": "maker",
+   "rate": 0.0175,
+   "contracts": 1,
+   "price": 0.95,
+   "expected": 0.01
+  },
+  {
+   "kind": "maker",
+   "rate": 0.0175,
+   "contracts": 2,
+   "price": 0.05,
+   "expected": 0.01
+  },
+  {
+   "kind": "maker",
+   "rate": 0.0175,
+   "contracts": 2,
+   "price": 0.27,
+   "expected": 0.01
+  },
+  {
+   "kind": "maker",
+   "rate": 0.0175,
+   "contracts": 2,
+   "price": 0.4,
+   "expected": 0.01
+  },
+  {
+   "kind": "maker",
+   "rate": 0.0175,
+   "contracts": 2,
+   "price": 0.5,
+   "expected": 0.01
+  },
+  {
+   "kind": "maker",
+   "rate": 0.0175,
+   "contracts": 2,
+   "price": 0.73,
+   "expected": 0.01
+  },
+  {
+   "kind": "maker",
+   "rate": 0.0175,
+   "contracts": 2,
+   "price": 0.95,
+   "expected": 0.01
+  },
+  {
+   "kind": "maker",
+   "rate": 0.0175,
+   "contracts": 5,
+   "price": 0.05,
+   "expected": 0.01
+  },
+  {
+   "kind": "maker",
+   "rate": 0.0175,
+   "contracts": 5,
+   "price": 0.27,
+   "expected": 0.02
+  },
+  {
+   "kind": "maker",
+   "rate": 0.0175,
+   "contracts": 5,
+   "price": 0.4,
+   "expected": 0.03
+  },
+  {
+   "kind": "maker",
+   "rate": 0.0175,
+   "contracts": 5,
+   "price": 0.5,
+   "expected": 0.03
+  },
+  {
+   "kind": "maker",
+   "rate": 0.0175,
+   "contracts": 5,
+   "price": 0.73,
+   "expected": 0.02
+  },
+  {
+   "kind": "maker",
+   "rate": 0.0175,
+   "contracts": 5,
+   "price": 0.95,
+   "expected": 0.01
+  },
+  {
+   "kind": "taker",
+   "rate": 0.07,
+   "contracts": 1,
+   "price": 0.1,
+   "expected": 0.01
+  },
+  {
+   "kind": "taker",
+   "rate": 0.07,
+   "contracts": 1,
+   "price": 0.5,
+   "expected": 0.02
+  },
+  {
+   "kind": "taker",
+   "rate": 0.07,
+   "contracts": 1,
+   "price": 0.9,
+   "expected": 0.01
+  },
+  {
+   "kind": "taker",
+   "rate": 0.07,
+   "contracts": 3,
+   "price": 0.1,
+   "expected": 0.02
+  },
+  {
+   "kind": "taker",
+   "rate": 0.07,
+   "contracts": 3,
+   "price": 0.5,
+   "expected": 0.06
+  },
+  {
+   "kind": "taker",
+   "rate": 0.07,
+   "contracts": 3,
+   "price": 0.9,
+   "expected": 0.02
+  }
+ ],
+ "fill_sequences": [
+  {
+   "name": "roundtrip_maker",
+   "fills": [
+    {
+     "trade_id": "f1",
+     "market_ticker": "KXADP-X",
+     "action": "buy",
+     "side": "yes",
+     "yes_price_dollars": 0.4,
+     "count": 1,
+     "is_taker": false
+    },
+    {
+     "trade_id": "f2",
+     "market_ticker": "KXADP-X",
+     "action": "sell",
+     "side": "yes",
+     "yes_price_dollars": 0.45,
+     "count": 1,
+     "is_taker": false
+    }
+   ],
+   "expected": {
+    "position": 0,
+    "entry_price": null,
+    "daily_pnl": 0.02999999999999999,
+    "fees_paid": 0.02,
+    "wins": 1,
+    "losses": 0,
+    "taker_fills": 0,
+    "maker_fills": 2,
+    "realized_by_ticker": 0.04999999999999999,
+    "fills": 2
+   }
+  },
+  {
+   "name": "taker_and_dup",
+   "fills": [
+    {
+     "trade_id": "t1",
+     "market_ticker": "KXBTCD-X",
+     "action": "buy",
+     "side": "yes",
+     "yes_price_dollars": 0.5,
+     "count": 1,
+     "is_taker": true
+    },
+    {
+     "trade_id": "t1",
+     "market_ticker": "KXBTCD-X",
+     "action": "buy",
+     "side": "yes",
+     "yes_price_dollars": 0.5,
+     "count": 1,
+     "is_taker": true
+    }
+   ],
+   "expected": {
+    "position": 1,
+    "entry_price": 0.5,
+    "daily_pnl": -0.02,
+    "fees_paid": 0.02,
+    "wins": 0,
+    "losses": 0,
+    "taker_fills": 1,
+    "maker_fills": 0,
+    "realized_by_ticker": 0.0,
+    "fills": 1
+   }
+  },
+  {
+   "name": "no_side_short_cover",
+   "fills": [
+    {
+     "trade_id": "n1",
+     "market_ticker": "KXADP-X",
+     "action": "buy",
+     "side": "no",
+     "no_price_dollars": 0.55,
+     "count": 2,
+     "is_taker": false
+    },
+    {
+     "trade_id": "n2",
+     "market_ticker": "KXADP-X",
+     "action": "sell",
+     "side": "no",
+     "no_price_dollars": 0.6,
+     "count": 1,
+     "is_taker": false
+    }
+   ],
+   "expected": {
+    "position": -1,
+    "entry_price": 0.44999999999999996,
+    "daily_pnl": 0.029999999999999933,
+    "fees_paid": 0.02,
+    "wins": 1,
+    "losses": 0,
+    "taker_fills": 0,
+    "maker_fills": 2,
+    "realized_by_ticker": 0.04999999999999993,
+    "fills": 2
+   }
+  },
+  {
+   "name": "extend_reduce_flip",
+   "fills": [
+    {
+     "trade_id": "a",
+     "market_ticker": "KXADP-X",
+     "action": "buy",
+     "side": "yes",
+     "yes_price_dollars": 0.4,
+     "count": 1,
+     "is_taker": false
+    },
+    {
+     "trade_id": "b",
+     "market_ticker": "KXADP-X",
+     "action": "buy",
+     "side": "yes",
+     "yes_price_dollars": 0.5,
+     "count": 1,
+     "is_taker": false
+    },
+    {
+     "trade_id": "c",
+     "market_ticker": "KXADP-X",
+     "action": "sell",
+     "side": "yes",
+     "yes_price_dollars": 0.47,
+     "count": 3,
+     "is_taker": false
+    }
+   ],
+   "expected": {
+    "position": -1,
+    "entry_price": 0.47,
+    "daily_pnl": -7.632783294297951e-17,
+    "fees_paid": 0.04,
+    "wins": 1,
+    "losses": 0,
+    "taker_fills": 0,
+    "maker_fills": 3,
+    "realized_by_ticker": 0.039999999999999925,
+    "fills": 3
+   }
+  }
+ ],
+ "quote_cases": [
+  {
+   "name": "basic",
+   "category": "KXADP",
+   "book": {
+    "yes": [
+     [
+      0.3,
+      50
+     ]
+    ],
+    "no": [
+     [
+      0.5,
+      40
+     ]
+    ]
+   },
+   "tick": 0.01,
+   "position": 0,
+   "balance_backoff_until": 0.0,
+   "open_order_count": 0,
+   "ever_quoted": false,
+   "bid_order_id": null,
+   "ask_order_id": null,
+   "quoted_prices": null,
+   "steps_in": [
+    {
+     "action": [
+      -0.5,
+      0.0
+     ],
+     "now_mono": 100.0
+    }
+   ],
+   "steps_out": [
+    {
+     "skipped": false,
+     "bid_cents": 27.0,
+     "ask_cents": 53.0,
+     "place_bid": true,
+     "place_ask": true,
+     "cancel_ids": [],
+     "quoted_bid": 0.27,
+     "quoted_ask": 0.53,
+     "post_last_quote_time": 100.0
+    }
+   ]
+  },
+  {
+   "name": "throttle",
+   "category": "KXADP",
+   "book": {
+    "yes": [
+     [
+      0.3,
+      50
+     ]
+    ],
+    "no": [
+     [
+      0.5,
+      40
+     ]
+    ]
+   },
+   "tick": 0.01,
+   "position": 0,
+   "balance_backoff_until": 0.0,
+   "open_order_count": 0,
+   "ever_quoted": false,
+   "bid_order_id": null,
+   "ask_order_id": null,
+   "quoted_prices": null,
+   "steps_in": [
+    {
+     "action": [
+      -0.5,
+      0.0
+     ],
+     "now_mono": 100.0
+    },
+    {
+     "action": [
+      -0.5,
+      0.0
+     ],
+     "now_mono": 100.5
+    },
+    {
+     "action": [
+      -0.5,
+      0.0
+     ],
+     "now_mono": 101.1
+    }
+   ],
+   "steps_out": [
+    {
+     "skipped": false,
+     "bid_cents": 27.0,
+     "ask_cents": 53.0,
+     "place_bid": true,
+     "place_ask": true,
+     "cancel_ids": [],
+     "quoted_bid": 0.27,
+     "quoted_ask": 0.53,
+     "post_last_quote_time": 100.0
+    },
+    {
+     "skipped": true,
+     "bid_cents": null,
+     "ask_cents": null,
+     "place_bid": false,
+     "place_ask": false,
+     "cancel_ids": [],
+     "quoted_bid": 0.27,
+     "quoted_ask": 0.53,
+     "post_last_quote_time": 100.0
+    },
+    {
+     "skipped": true,
+     "bid_cents": null,
+     "ask_cents": null,
+     "place_bid": false,
+     "place_ask": false,
+     "cancel_ids": [],
+     "quoted_bid": 0.27,
+     "quoted_ask": 0.53,
+     "post_last_quote_time": 101.1
+    }
+   ]
+  },
+  {
+   "name": "balance_backoff",
+   "category": "KXADP",
+   "book": {
+    "yes": [
+     [
+      0.3,
+      50
+     ]
+    ],
+    "no": [
+     [
+      0.5,
+      40
+     ]
+    ]
+   },
+   "tick": 0.01,
+   "position": 0,
+   "balance_backoff_until": 200.0,
+   "open_order_count": 0,
+   "ever_quoted": false,
+   "bid_order_id": null,
+   "ask_order_id": null,
+   "quoted_prices": null,
+   "steps_in": [
+    {
+     "action": [
+      -0.5,
+      0.0
+     ],
+     "now_mono": 100.0
+    }
+   ],
+   "steps_out": [
+    {
+     "skipped": true,
+     "bid_cents": null,
+     "ask_cents": null,
+     "place_bid": false,
+     "place_ask": false,
+     "cancel_ids": [],
+     "quoted_bid": null,
+     "quoted_ask": null,
+     "post_last_quote_time": 100.0
+    }
+   ]
+  },
+  {
+   "name": "quote_band_extreme_mid",
+   "category": "KXADP",
+   "book": {
+    "yes": [
+     [
+      0.965,
+      10
+     ]
+    ],
+    "no": [
+     [
+      0.02,
+      10
+     ]
+    ]
+   },
+   "tick": 0.01,
+   "position": 0,
+   "balance_backoff_until": 0.0,
+   "open_order_count": 0,
+   "ever_quoted": false,
+   "bid_order_id": null,
+   "ask_order_id": null,
+   "quoted_prices": null,
+   "steps_in": [
+    {
+     "action": [
+      -0.5,
+      0.0
+     ],
+     "now_mono": 100.0
+    }
+   ],
+   "steps_out": [
+    {
+     "skipped": true,
+     "bid_cents": null,
+     "ask_cents": null,
+     "place_bid": false,
+     "place_ask": false,
+     "cancel_ids": [],
+     "quoted_bid": null,
+     "quoted_ask": null,
+     "post_last_quote_time": 100.0
+    }
+   ]
+  },
+  {
+   "name": "order_budget_blocks",
+   "category": "KXADP",
+   "book": {
+    "yes": [
+     [
+      0.3,
+      50
+     ]
+    ],
+    "no": [
+     [
+      0.5,
+      40
+     ]
+    ]
+   },
+   "tick": 0.01,
+   "position": 0,
+   "balance_backoff_until": 0.0,
+   "open_order_count": 60,
+   "ever_quoted": false,
+   "bid_order_id": null,
+   "ask_order_id": null,
+   "quoted_prices": null,
+   "steps_in": [
+    {
+     "action": [
+      -0.5,
+      0.0
+     ],
+     "now_mono": 100.0
+    }
+   ],
+   "steps_out": [
+    {
+     "skipped": true,
+     "bid_cents": null,
+     "ask_cents": null,
+     "place_bid": false,
+     "place_ask": false,
+     "cancel_ids": [],
+     "quoted_bid": null,
+     "quoted_ask": null,
+     "post_last_quote_time": 100.0
+    }
+   ]
+  },
+  {
+   "name": "order_budget_exempt_ever_quoted",
+   "category": "KXADP",
+   "book": {
+    "yes": [
+     [
+      0.3,
+      50
+     ]
+    ],
+    "no": [
+     [
+      0.5,
+      40
+     ]
+    ]
+   },
+   "tick": 0.01,
+   "position": 0,
+   "balance_backoff_until": 0.0,
+   "open_order_count": 60,
+   "ever_quoted": true,
+   "bid_order_id": null,
+   "ask_order_id": null,
+   "quoted_prices": null,
+   "steps_in": [
+    {
+     "action": [
+      -0.5,
+      0.0
+     ],
+     "now_mono": 100.0
+    }
+   ],
+   "steps_out": [
+    {
+     "skipped": false,
+     "bid_cents": 27.0,
+     "ask_cents": 53.0,
+     "place_bid": true,
+     "place_ask": true,
+     "cancel_ids": [],
+     "quoted_bid": 0.27,
+     "quoted_ask": 0.53,
+     "post_last_quote_time": 100.0
+    }
+   ]
+  },
+  {
+   "name": "fee_gate_narrow_spread",
+   "category": "KXADP",
+   "book": {
+    "yes": [
+     [
+      0.48,
+      50
+     ]
+    ],
+    "no": [
+     [
+      0.5,
+      40
+     ]
+    ]
+   },
+   "tick": 0.01,
+   "position": 0,
+   "balance_backoff_until": 0.0,
+   "open_order_count": 0,
+   "ever_quoted": false,
+   "bid_order_id": null,
+   "ask_order_id": null,
+   "quoted_prices": null,
+   "steps_in": [
+    {
+     "action": [
+      -1.0,
+      0.0
+     ],
+     "now_mono": 100.0
+    }
+   ],
+   "steps_out": [
+    {
+     "skipped": true,
+     "bid_cents": null,
+     "ask_cents": null,
+     "place_bid": false,
+     "place_ask": false,
+     "cancel_ids": [],
+     "quoted_bid": null,
+     "quoted_ask": null,
+     "post_last_quote_time": 100.0
+    }
+   ]
+  },
+  {
+   "name": "tick_move_keep",
+   "category": "KXADP",
+   "book": {
+    "yes": [
+     [
+      0.3,
+      50
+     ]
+    ],
+    "no": [
+     [
+      0.5,
+      40
+     ]
+    ]
+   },
+   "tick": 0.01,
+   "position": 0,
+   "balance_backoff_until": 0.0,
+   "open_order_count": 0,
+   "ever_quoted": false,
+   "bid_order_id": "b1",
+   "ask_order_id": "a1",
+   "quoted_prices": [
+    0.27,
+    0.53
+   ],
+   "steps_in": [
+    {
+     "action": [
+      -0.5,
+      0.0
+     ],
+     "now_mono": 100.0
+    }
+   ],
+   "steps_out": [
+    {
+     "skipped": true,
+     "bid_cents": null,
+     "ask_cents": null,
+     "place_bid": false,
+     "place_ask": false,
+     "cancel_ids": [],
+     "quoted_bid": 0.27,
+     "quoted_ask": 0.53,
+     "post_last_quote_time": 100.0
+    }
+   ]
+  },
+  {
+   "name": "stale_orders_cancelled",
+   "category": "KXADP",
+   "book": {
+    "yes": [
+     [
+      0.3,
+      50
+     ]
+    ],
+    "no": [
+     [
+      0.5,
+      40
+     ]
+    ]
+   },
+   "tick": 0.01,
+   "position": 0,
+   "balance_backoff_until": 0.0,
+   "open_order_count": 0,
+   "ever_quoted": false,
+   "bid_order_id": "b1",
+   "ask_order_id": "a1",
+   "quoted_prices": [
+    0.2,
+    0.6
+   ],
+   "steps_in": [
+    {
+     "action": [
+      -0.5,
+      0.0
+     ],
+     "now_mono": 100.0
+    }
+   ],
+   "steps_out": [
+    {
+     "skipped": false,
+     "bid_cents": 27.0,
+     "ask_cents": 53.0,
+     "place_bid": true,
+     "place_ask": true,
+     "cancel_ids": [
+      "a1",
+      "b1"
+     ],
+     "quoted_bid": 0.27,
+     "quoted_ask": 0.53,
+     "post_last_quote_time": 100.0
+    }
+   ]
+  },
+  {
+   "name": "inventory_cap_long",
+   "category": "KXADP",
+   "book": {
+    "yes": [
+     [
+      0.3,
+      50
+     ]
+    ],
+    "no": [
+     [
+      0.5,
+      40
+     ]
+    ]
+   },
+   "tick": 0.01,
+   "position": 5,
+   "balance_backoff_until": 0.0,
+   "open_order_count": 0,
+   "ever_quoted": false,
+   "bid_order_id": null,
+   "ask_order_id": null,
+   "quoted_prices": null,
+   "steps_in": [
+    {
+     "action": [
+      -0.5,
+      0.0
+     ],
+     "now_mono": 100.0
+    }
+   ],
+   "steps_out": [
+    {
+     "skipped": false,
+     "bid_cents": null,
+     "ask_cents": 53.0,
+     "place_bid": false,
+     "place_ask": true,
+     "cancel_ids": [],
+     "quoted_bid": 0.27,
+     "quoted_ask": 0.53,
+     "post_last_quote_time": 100.0
+    }
+   ]
+  },
+  {
+   "name": "inventory_cap_short",
+   "category": "KXADP",
+   "book": {
+    "yes": [
+     [
+      0.3,
+      50
+     ]
+    ],
+    "no": [
+     [
+      0.5,
+      40
+     ]
+    ]
+   },
+   "tick": 0.01,
+   "position": -5,
+   "balance_backoff_until": 0.0,
+   "open_order_count": 0,
+   "ever_quoted": false,
+   "bid_order_id": null,
+   "ask_order_id": null,
+   "quoted_prices": null,
+   "steps_in": [
+    {
+     "action": [
+      -0.5,
+      0.0
+     ],
+     "now_mono": 100.0
+    }
+   ],
+   "steps_out": [
+    {
+     "skipped": false,
+     "bid_cents": 27.0,
+     "ask_cents": null,
+     "place_bid": true,
+     "place_ask": false,
+     "cancel_ids": [],
+     "quoted_bid": 0.27,
+     "quoted_ask": 0.53,
+     "post_last_quote_time": 100.0
+    }
+   ]
+  },
+  {
+   "name": "subpenny",
+   "category": "KXADP",
+   "book": {
+    "yes": [
+     [
+      0.3,
+      50
+     ]
+    ],
+    "no": [
+     [
+      0.5,
+      40
+     ]
+    ]
+   },
+   "tick": 0.001,
+   "position": 0,
+   "balance_backoff_until": 0.0,
+   "open_order_count": 0,
+   "ever_quoted": false,
+   "bid_order_id": null,
+   "ask_order_id": null,
+   "quoted_prices": null,
+   "steps_in": [
+    {
+     "action": [
+      0.0,
+      0.0
+     ],
+     "now_mono": 100.0
+    }
+   ],
+   "steps_out": [
+    {
+     "skipped": false,
+     "bid_cents": 14.6,
+     "ask_cents": 65.4,
+     "place_bid": true,
+     "place_ask": true,
+     "cancel_ids": [],
+     "quoted_bid": 0.146,
+     "quoted_ask": 0.654,
+     "post_last_quote_time": 100.0
+    }
+   ]
+  },
+  {
+   "name": "nonround_action",
+   "category": "KXADP",
+   "book": {
+    "yes": [
+     [
+      0.3,
+      50
+     ]
+    ],
+    "no": [
+     [
+      0.5,
+      40
+     ]
+    ]
+   },
+   "tick": 0.01,
+   "position": 0,
+   "balance_backoff_until": 0.0,
+   "open_order_count": 0,
+   "ever_quoted": false,
+   "bid_order_id": null,
+   "ask_order_id": null,
+   "quoted_prices": null,
+   "steps_in": [
+    {
+     "action": [
+      -0.123456,
+      0.654321
+     ],
+     "now_mono": 100.0
+    }
+   ],
+   "steps_out": [
+    {
+     "skipped": false,
+     "bid_cents": 21.0,
+     "ask_cents": 66.0,
+     "place_bid": true,
+     "place_ask": true,
+     "cancel_ids": [],
+     "quoted_bid": 0.21,
+     "quoted_ask": 0.66,
+     "post_last_quote_time": 100.0
+    }
+   ]
+  },
+  {
+   "name": "rounding_boundary",
+   "category": "KXADP",
+   "book": {
+    "yes": [
+     [
+      0.3,
+      50
+     ]
+    ],
+    "no": [
+     [
+      0.5,
+      40
+     ]
+    ]
+   },
+   "tick": 0.01,
+   "position": 0,
+   "balance_backoff_until": 0.0,
+   "open_order_count": 0,
+   "ever_quoted": false,
+   "bid_order_id": null,
+   "ask_order_id": null,
+   "quoted_prices": null,
+   "steps_in": [
+    {
+     "action": [
+      -0.37970486136133474,
+      0.4596634965202573
+     ],
+     "now_mono": 100.0
+    }
+   ],
+   "steps_out": [
+    {
+     "skipped": false,
+     "bid_cents": 26.0,
+     "ask_cents": 59.0,
+     "place_bid": true,
+     "place_ask": true,
+     "cancel_ids": [],
+     "quoted_bid": 0.26,
+     "quoted_ask": 0.59,
+     "post_last_quote_time": 100.0
+    }
+   ]
+  }
+ ]
+}

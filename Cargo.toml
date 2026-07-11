@@ -1,0 +1,47 @@
+[package]
+name = "kalshi-mm"
+version = "0.1.0"
+edition = "2021"
+description = "Kalshi market-making bot — Rust port of rl_bot/live_trader_v2.py"
+
+[dependencies]
+# Async runtime + HTTP + WebSocket
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+
+# Config + serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Request signing (RSA-PSS SHA256, salt = digest length — Kalshi spec)
+rsa = { version = "0.9", features = ["sha2"] }
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+
+# CLI, logging, misc
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+fs2 = "0.4"
+anyhow = "1"
+thiserror = "1"
+chrono = "0.4"
+dirs = "5"
+# ONNX inference for the PPO policy (small MLP). "download-binaries" fetches
+# the ONNX Runtime shared library from GitHub at build time, so `cargo build`
+# needs network access once (cached under target-dir after). For an offline
+# or vendored build, set ORT_LIB_LOCATION (or ORT_LIB_PATH) to a local
+# onnxruntime install and ort-sys will link against that instead.
+ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }
+
+[dev-dependencies]
+rsa = { version = "0.9", features = ["sha2", "pem"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
