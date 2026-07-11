@@ -255,6 +255,39 @@ cargo run --release -- --paper --config lowvol   # paper mode against live data
 `start_live_trading.sh` wraps the live (real-money) launch with pre-flight
 checks; `deploy/aws_deploy.sh` provisions an EC2 instance and runs it there.
 
+## Releases (container image on GitHub Packages)
+
+Tagged releases publish a container image to GitHub Packages (GHCR), private
+to this repo. The image bundles the binary and its statically-linked ONNX
+Runtime plus `config/`; **`.env` (credentials) and `models/` (checkpoints)
+are not baked in** — they're mounted at run time.
+
+Cut a release:
+
+```
+git tag v0.1.0
+git push origin v0.1.0        # .github/workflows/release.yml builds & pushes the image
+```
+
+This publishes `ghcr.io/heywoodwt/kalshi-mm:0.1.0` (plus `0.1` and `latest`).
+Run it — paper mode is the default; add live args to override:
+
+```
+# paper (safe default)
+docker run --rm --env-file .env -v "$PWD/models:/app/models" \
+  ghcr.io/heywoodwt/kalshi-mm:0.1.0
+
+# live: pass --config explicitly and provide live credentials in .env.
+# KALSHI_API_SECRET is a path to the RSA key PEM — mount it and point at it,
+# or set KALSHI_API_SECRET to the inline PEM contents.
+docker run --rm --env-file .env \
+  -v "$PWD/models:/app/models" -v "$PWD/kalshi_key.pem:/app/kalshi_key.pem:ro" \
+  ghcr.io/heywoodwt/kalshi-mm:0.1.0 --config lowvol
+```
+
+Pulling requires a GitHub token with `read:packages`
+(`docker login ghcr.io -u <user>`), since the package is private.
+
 ## File map
 
 | File | Responsibility |
@@ -277,5 +310,7 @@ checks; `deploy/aws_deploy.sh` provisions an EC2 instance and runs it there.
 The bot has been smoke-tested in paper mode against live market data
 (connects, discovers all markets, plans sane quotes, places simulated
 orders) but has not yet been run live with real money. CI
-(`.github/workflows/ci.yml`) and deployment scripts (`deploy/aws_deploy.sh`)
-exist but the AWS deployment has not been executed.
+(`.github/workflows/ci.yml`), the release/packaging workflow
+(`.github/workflows/release.yml` -> GHCR), and deployment scripts
+(`deploy/aws_deploy.sh`) exist but neither the AWS deployment nor a live
+run has been executed.

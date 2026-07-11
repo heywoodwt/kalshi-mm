@@ -1,0 +1,8 @@
+# Keep the build context small and free of local/runtime cruft.
+target/
+.git/
+.github/
+.env
+*.log
+models/
+deploy/
