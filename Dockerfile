@@ -6,14 +6,18 @@
 # single binary plus the system C++/OpenMP libs it links against dynamically.
 
 # --- build stage --------------------------------------------------------------
-FROM rust:1-bookworm AS build
+# trixie (glibc 2.41), NOT bookworm (glibc 2.36): the prebuilt ONNX Runtime
+# that ort's download-binaries fetches references __isoc23_strtoll etc., which
+# only exist in glibc >= 2.38 — linking on bookworm fails with undefined
+# symbols. The runtime stage must match, so it's trixie too.
+FROM rust:1-trixie AS build
 WORKDIR /src
 COPY . .
 # --locked: build exactly the pinned Cargo.lock (reproducible releases).
 RUN cargo build --release --locked
 
 # --- runtime stage ------------------------------------------------------------
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 # libstdc++6 + libgomp1: ONNX Runtime's C++ core and its OpenMP thread pool.
 # ca-certificates: TLS trust roots for the Kalshi REST/WebSocket endpoints.
 RUN apt-get update \
