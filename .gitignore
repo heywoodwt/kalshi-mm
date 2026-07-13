@@ -3,8 +3,8 @@ target/
 # Machine-local build tuning (e.g. a target-dir override to dodge OneDrive
 # file locks) — never portable, so it's per-checkout, not per-repo.
 /.cargo/config.toml
-# Runtime-only: production ONNX checkpoints copied here at deploy time
-# (test fixtures live in tests/fixtures/models/ and ARE committed) and the
-# local credentials file.
-/models/
+# The lowvol production policies ARE committed (and baked into the release
+# image); any OTHER checkpoints an operator drops into models/ stay ignored.
+/models/*
+!/models/realistic_20dim_*.onnx
 .env

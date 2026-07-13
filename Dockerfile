@@ -31,9 +31,11 @@ WORKDIR /app
 ENV HOME=/app
 
 COPY --from=build /src/target/release/kalshi-mm /usr/local/bin/kalshi-mm
-# Deployment config is baked in; .env (secrets) and models/ (checkpoints) are
-# mounted at run time — they are intentionally NOT part of the image.
+# Deployment config AND the lowvol production ONNX policies are baked in
+# (--models-dir defaults to ./models). Only .env (secrets) is mounted at
+# run time — it is intentionally NOT part of the image.
 COPY --from=build --chown=kalshi:kalshi /src/config /app/config
+COPY --from=build --chown=kalshi:kalshi /src/models /app/models
 
 USER kalshi
 ENTRYPOINT ["kalshi-mm"]

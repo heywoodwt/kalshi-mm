@@ -259,30 +259,30 @@ checks; `deploy/aws_deploy.sh` provisions an EC2 instance and runs it there.
 
 Tagged releases publish a container image to GitHub Packages (GHCR), private
 to this repo. The image bundles the binary and its statically-linked ONNX
-Runtime plus `config/`; **`.env` (credentials) and `models/` (checkpoints)
-are not baked in** — they're mounted at run time.
+Runtime, `config/`, **and the committed lowvol production policies in
+`models/`** (baked in as of v0.2.0). Only **`.env` (credentials)** is mounted
+at run time.
 
 Cut a release:
 
 ```
-git tag v0.1.0
-git push origin v0.1.0        # .github/workflows/release.yml builds & pushes the image
+git tag v0.2.0
+git push origin v0.2.0        # .github/workflows/release.yml builds & pushes the image
 ```
 
-This publishes `ghcr.io/heywoodwt/kalshi-mm:0.1.0` (plus `0.1` and `latest`).
+This publishes `ghcr.io/heywoodwt/kalshi-mm:0.2.0` (plus `0.2` and `latest`).
 Run it — paper mode is the default; add live args to override:
 
 ```
-# paper (safe default)
-docker run --rm --env-file .env -v "$PWD/models:/app/models" \
-  ghcr.io/heywoodwt/kalshi-mm:0.1.0
+# paper (safe default) — models are already in the image
+docker run --rm --env-file .env ghcr.io/heywoodwt/kalshi-mm:0.2.0
 
 # live: pass --config explicitly and provide live credentials in .env.
 # KALSHI_API_SECRET is a path to the RSA key PEM — mount it and point at it,
 # or set KALSHI_API_SECRET to the inline PEM contents.
 docker run --rm --env-file .env \
-  -v "$PWD/models:/app/models" -v "$PWD/kalshi_key.pem:/app/kalshi_key.pem:ro" \
-  ghcr.io/heywoodwt/kalshi-mm:0.1.0 --config lowvol
+  -v "$PWD/kalshi_key.pem:/app/kalshi_key.pem:ro" \
+  ghcr.io/heywoodwt/kalshi-mm:0.2.0 --config lowvol
 ```
 
 Pulling requires a GitHub token with `read:packages`

@@ -1,6 +1,6 @@
 [package]
 name = "kalshi-mm"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Kalshi market-making bot — Rust port of rl_bot/live_trader_v2.py"
 

@@ -4,5 +4,6 @@ target/
 .github/
 .env
 *.log
-models/
 deploy/
+# models/ is NOT excluded — the committed production policies are baked
+# into the image (see Dockerfile).
