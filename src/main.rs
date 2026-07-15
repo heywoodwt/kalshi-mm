@@ -28,10 +28,12 @@ use tracing_subscriber::Layer as _; // per-layer with_filter
 use kalshi_mm::api::{KalshiClient, MarketApi, PROD_BASE_URL};
 use kalshi_mm::book::TakerSide;
 use kalshi_mm::config::{CategoryConfig, Config};
-use kalshi_mm::engine::{check_risk_limits, exit_decision, plan_quotes};
+use kalshi_mm::engine::{check_risk_limits, exit_decision, plan_quotes, spot_unwind_decision};
 use kalshi_mm::features::build_observation;
+use kalshi_mm::ladder::Ladders;
 use kalshi_mm::model::Policy;
 use kalshi_mm::paper::PaperClient;
+use kalshi_mm::spot::{SpotFeed, SpotState, COINBASE_WS_URL};
 use kalshi_mm::state::{normalize_fill, TraderState};
 use kalshi_mm::transport::{WsClient, WsEvent, PROD_WS_URL};
 use kalshi_mm::{book, executor, state};
@@ -167,6 +169,15 @@ struct Trader<M: MarketApi> {
     active_tickers: HashMap<String, String>,
     active_set: HashSet<String>,
     running: Arc<AtomicBool>,
+    /// Spot defense state (always present; inert when no category binds a feed).
+    spot: SpotState,
+    ladders: Ladders,
+    /// Categories with spot_feed set in config.
+    spot_bound: HashSet<String>,
+    /// Trend-gate edge detection for the one-shot cancel.
+    spot_gate_on: bool,
+    /// ticker -> last unwind evaluation (mono s), 1/s throttle.
+    spot_unwind_last: HashMap<String, f64>,
 }
 
 async fn run_trader<M: MarketApi>(
@@ -178,6 +189,9 @@ async fn run_trader<M: MarketApi>(
 ) -> Result<()> {
     let cats: HashMap<String, CategoryConfig> =
         cfg.categories.iter().map(|c| (c.name.clone(), c.clone())).collect();
+    let spot_bound: HashSet<String> =
+        cfg.categories.iter().filter(|c| c.spot_feed.is_some()).map(|c| c.name.clone()).collect();
+    let spot_tau = cfg.spot.fv_ema_tau_s;
     let mut trader = Trader {
         api,
         cats,
@@ -187,6 +201,11 @@ async fn run_trader<M: MarketApi>(
         active_tickers: HashMap::new(),
         active_set: HashSet::new(),
         running: Arc::new(AtomicBool::new(true)),
+        spot: SpotState::new(spot_tau),
+        ladders: Ladders::default(),
+        spot_bound,
+        spot_gate_on: false,
+        spot_unwind_last: HashMap::new(),
     };
 
     trader.optimize_startup_orders().await;
@@ -194,6 +213,8 @@ async fn run_trader<M: MarketApi>(
     trader.discover_markets().await;
     trader.fetch_market_details().await;
     trader.sync_positions().await;
+
+    trader.ladders = Ladders::build(trader.active_tickers.keys().map(String::as_str));
 
     // WebSocket task feeds the event loop; without credentials fall back to
     // REST polling (10s), same as Python.
@@ -203,6 +224,7 @@ async fn run_trader<M: MarketApi>(
             Ok(ws) => {
                 let tickers: Vec<String> = trader.active_tickers.keys().cloned().collect();
                 let running = trader.running.clone();
+                let tx = tx.clone();
                 tokio::spawn(async move { ws.run(tickers, tx, running).await });
                 true
             }
@@ -217,6 +239,23 @@ async fn run_trader<M: MarketApi>(
         }
     };
 
+    // Public spot feed for spot-bound categories — works in paper mode too
+    // (no credentials needed). One distinct product supported.
+    let mut spot_products: Vec<String> =
+        trader.cfg.categories.iter().filter_map(|c| c.spot_feed.clone()).collect();
+    spot_products.sort();
+    spot_products.dedup();
+    if spot_products.len() > 1 {
+        warn!("Multiple spot products {spot_products:?} — only {} is used", spot_products[0]);
+    }
+    let has_spot = !spot_products.is_empty();
+    if let Some(product) = spot_products.first() {
+        let feed = SpotFeed::new(COINBASE_WS_URL, product);
+        let tx = tx.clone();
+        let running = trader.running.clone();
+        tokio::spawn(async move { feed.run(tx, running).await });
+    }
+
     // Seed the books with REST snapshots (WS deltas need a baseline)
     trader.fetch_initial_snapshots().await;
 
@@ -224,7 +263,7 @@ async fn run_trader<M: MarketApi>(
     info!("Initialization complete - trading on {} markets", trader.active_tickers.len());
     info!("{}", "=".repeat(80));
 
-    trader.event_loop(rx, use_ws).await;
+    trader.event_loop(rx, use_ws, has_spot).await;
     Ok(())
 }
 
@@ -411,7 +450,7 @@ impl<M: MarketApi> Trader<M> {
 
     // --- event loop -----------------------------------------------------------
 
-    async fn event_loop(&mut self, mut rx: mpsc::Receiver<WsEvent>, use_ws: bool) {
+    async fn event_loop(&mut self, mut rx: mpsc::Receiver<WsEvent>, use_ws: bool, has_spot: bool) {
         info!("Starting live trading...");
         let mut fills_tick = tokio::time::interval(Duration::from_secs(5));
         let mut sync_tick = tokio::time::interval(Duration::from_secs(30));
@@ -433,10 +472,10 @@ impl<M: MarketApi> Trader<M> {
 
         while self.running.load(Ordering::Relaxed) {
             tokio::select! {
-                Some(event) = rx.recv(), if use_ws => match event {
+                Some(event) = rx.recv(), if use_ws || has_spot => match event {
                     WsEvent::Book { ticker, msg } => self.on_book_update(&ticker, &msg).await,
                     WsEvent::Trade { ticker, msg } => self.on_trade(&ticker, &msg),
-                    WsEvent::Spot { .. } => {} // wired in Task 7
+                    WsEvent::Spot { price } => self.on_spot_tick(price).await,
                 },
                 _ = fills_tick.tick() => {
                     // Page through the cursor so a burst of >200 fills in the
@@ -479,6 +518,105 @@ impl<M: MarketApi> Trader<M> {
         info!("Trading stopped.");
     }
 
+    /// True = spot-bound categories must not quote right now. Evaluated
+    /// fresh (not cached): staleness can develop without any tick arriving.
+    fn spot_gated(&self, now_mono: f64) -> bool {
+        if self.spot.is_stale(now_mono, self.cfg.spot.stale_max_s) {
+            return true;
+        }
+        match self.spot.ret(60.0, now_mono) {
+            Some(r) => r.abs() > self.cfg.spot.gate_ret_60s,
+            None => true, // <60s of history — conservative until warm
+        }
+    }
+
+    /// Spot-implied fair-value shift for one ticker, clamped. None = orphan
+    /// whose worst-case unknown shift is >= 1 tick (skip quoting; spec's
+    /// calm-only rule). Some(0.0) for non-bound categories.
+    fn fv_shift_for(&self, ticker: &str, category: &str) -> Option<f64> {
+        if !self.spot_bound.contains(category) {
+            return Some(0.0);
+        }
+        let (Some(spot_now), Some(ema)) = (self.spot.latest(), self.spot.ema()) else {
+            return None;
+        };
+        let dist = spot_now - ema;
+        let mid_of = |t: &str| self.state.tickers.get(t).and_then(|ts| ts.book.mid());
+        match self.ladders.delta_for(ticker, self.cfg.spot.delta_max, mid_of) {
+            Some(delta) => {
+                Some((delta * dist).clamp(-self.cfg.spot.fv_shift_max, self.cfg.spot.fv_shift_max))
+            }
+            None if self.cfg.spot.delta_max * dist.abs() < 0.01 => Some(0.0),
+            None => None,
+        }
+    }
+
+    /// Fold one spot tick: trend-gate edge detection (one-shot cancel of
+    /// resting spot-bound quotes) + proactive unwind of adverse inventory.
+    async fn on_spot_tick(&mut self, price: f64) {
+        let now = mono_now();
+        if !self.spot.on_tick(price, now) {
+            return; // outlier dropped
+        }
+        let gated = self.spot_gated(now);
+        if gated && !self.spot_gate_on {
+            let ret = self.spot.ret(60.0, now).unwrap_or(0.0);
+            warn!("SPOT GATE ON (60s ret {:+.3}%) — canceling spot-bound quotes", ret * 100.0);
+            self.cancel_spot_bound_quotes().await;
+        } else if !gated && self.spot_gate_on {
+            info!("SPOT GATE OFF");
+        }
+        self.spot_gate_on = gated;
+        self.check_spot_unwind(now).await;
+    }
+
+    /// One-shot on the gate's rising edge: resting quotes are pickoff bait.
+    async fn cancel_spot_bound_quotes(&mut self) {
+        let mut ids = Vec::new();
+        for ts in self.state.tickers.values_mut() {
+            if self.spot_bound.contains(&ts.category) {
+                ids.extend(ts.bid_order_id.take());
+                ids.extend(ts.ask_order_id.take());
+            }
+        }
+        for id in &ids {
+            let _ = self.api.cancel_order(id).await;
+        }
+        if !ids.is_empty() {
+            info!("Canceled {} resting spot-bound quotes", ids.len());
+        }
+    }
+
+    /// SPOT-ADVERSE exits, evaluated on spot ticks (1/s per ticker). Runs
+    /// even for halted categories — unwinding REDUCES risk.
+    async fn check_spot_unwind(&mut self, now_mono: f64) {
+        if self.spot.is_stale(now_mono, self.cfg.spot.stale_max_s) {
+            return;
+        }
+        let tickers: Vec<String> = self
+            .state
+            .tickers
+            .iter()
+            .filter(|(_, ts)| ts.position != 0 && self.spot_bound.contains(&ts.category))
+            .map(|(t, _)| t.clone())
+            .collect();
+        for ticker in tickers {
+            let last = self.spot_unwind_last.get(&ticker).copied().unwrap_or(f64::NEG_INFINITY);
+            if now_mono - last < 1.0 {
+                continue;
+            }
+            self.spot_unwind_last.insert(ticker.clone(), now_mono);
+            let category = self.state.tickers[&ticker].category.clone();
+            let Some(shift) = self.fv_shift_for(&ticker, &category) else { continue };
+            let ts = &self.state.tickers[&ticker];
+            let Some(plan) = spot_unwind_decision(ts, shift, self.cfg.spot.unwind_shift) else {
+                continue;
+            };
+            info!("EXIT (SPOT-ADVERSE): {ticker} inv={} fv_shift={shift:+.3}", ts.position);
+            executor::apply_exit_plan(&self.api, &category, &ticker, &plan).await;
+        }
+    }
+
     /// Hot path: fold the message into the book, then decide and quote.
     /// Ordering matches the Python callback exactly.
     async fn on_book_update(&mut self, ticker: &str, msg: &Value) {
@@ -516,6 +654,20 @@ impl<M: MarketApi> Trader<M> {
             return;
         }
 
+        // Spot defense (layers 9-11, spot-bound categories only): staleness
+        // and trend gates block quoting; the FV shift re-centers quotes.
+        let fv_shift = if self.spot_bound.contains(&category) {
+            if self.spot_gated(mono_now()) {
+                return;
+            }
+            match self.fv_shift_for(ticker, &category) {
+                Some(shift) => shift,
+                None => return, // orphan strike while spot is moving
+            }
+        } else {
+            0.0
+        };
+
         let ts = self.state.ticker(ticker, &category);
         let Some(obs) = build_observation(ticker, ts, &self.cfg.mm, epoch_now(), mono_now()) else {
             return;
@@ -535,7 +687,7 @@ impl<M: MarketApi> Trader<M> {
         let ts = self.state.ticker(ticker, &category);
         let plan = plan_quotes(
             action,
-            0.0,
+            fv_shift,
             ts,
             &self.cfg.mm,
             max_inventory,
