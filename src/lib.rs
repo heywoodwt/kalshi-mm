@@ -10,5 +10,6 @@ pub mod executor;
 pub mod features;
 pub mod model;
 pub mod paper;
+pub mod spot;
 pub mod state;
 pub mod transport;
