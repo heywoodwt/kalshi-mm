@@ -86,6 +86,12 @@ pub fn plan_quotes(
     balance_backoff_until: f64,
     now_mono: f64,
 ) -> Option<QuotePlan> {
+    // Garbage spot input must never become a quote. (Without this, a NaN
+    // shift only fails to quote by accident of clamp_quotes' min/max NaN
+    // handling — don't rely on that.) Doesn't burn the throttle slot.
+    if !fv_shift.is_finite() {
+        return None;
+    }
     if now_mono - ts.last_quote_time < 1.0 {
         return None;
     }
@@ -376,6 +382,10 @@ mod tests {
 
     #[test]
     fn fv_shift_recenters_quotes() {
+        // Non-finite shift is rejected outright (and spares the throttle slot)
+        let mut ts = wide_ts();
+        assert!(plan_quotes(ACTION, f64::NAN, &mut ts, &mm(), 5, 0, 0.0, 100.0).is_none());
+        assert_eq!(ts.last_quote_time, 0.0);
         // Unshifted (wide_ts, ACTION): bid 27 / ask 53 around mid 0.40.
         // Shift +0.10: center 0.50 -> bid 37 / ask 63.
         let mut ts = wide_ts();
