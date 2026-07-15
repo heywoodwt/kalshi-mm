@@ -546,6 +546,7 @@ impl<M: MarketApi> Trader<M> {
             Some(delta) => {
                 Some((delta * dist).clamp(-self.cfg.spot.fv_shift_max, self.cfg.spot.fv_shift_max))
             }
+            // 0.01 = one tick: unknown shift smaller than a tick can't move the quote
             None if self.cfg.spot.delta_max * dist.abs() < 0.01 => Some(0.0),
             None => None,
         }
@@ -564,7 +565,8 @@ impl<M: MarketApi> Trader<M> {
             warn!("SPOT GATE ON (60s ret {:+.3}%) — canceling spot-bound quotes", ret * 100.0);
             self.cancel_spot_bound_quotes().await;
         } else if !gated && self.spot_gate_on {
-            info!("SPOT GATE OFF");
+            let ret = self.spot.ret(60.0, now).unwrap_or(0.0);
+            info!("SPOT GATE OFF (60s ret {:+.3}%)", ret * 100.0);
         }
         self.spot_gate_on = gated;
         self.check_spot_unwind(now).await;
@@ -859,6 +861,19 @@ impl<M: MarketApi> Trader<M> {
               s.fees_paid, s.wins, s.losses, s.win_rate() * 100.0);
         info!("Daily PnL: ${:.2} | Cumulative PnL: ${:.2} | Positions open: {open}",
               s.daily_pnl, s.cumulative_pnl);
+        // Spot-feed health: a connected-but-silent feed gates all spot-bound
+        // quoting with no other log signal — this line is the 3am diagnostic
+        if !self.spot_bound.is_empty() {
+            let now = mono_now();
+            match self.spot.latest() {
+                Some(px) => info!(
+                    "Spot: {px:.2} (gated: {}, stale: {})",
+                    self.spot_gated(now),
+                    self.spot.is_stale(now, self.cfg.spot.stale_max_s),
+                ),
+                None => info!("Spot: NO DATA — spot-bound categories are dark"),
+            }
+        }
         info!("{}", "=".repeat(80));
     }
 

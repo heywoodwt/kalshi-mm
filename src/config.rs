@@ -167,10 +167,30 @@ impl Config {
             .with_context(|| format!("reading config {}", path.display()))?;
         let cfg: Config = toml::from_str(&text)
             .with_context(|| format!("parsing config {}", path.display()))?;
-        if cfg.categories.is_empty() {
-            bail!("config {} has no [[categories]]", path.display());
-        }
+        cfg.validate()
+            .with_context(|| format!("validating config {}", path.display()))?;
         Ok(cfg)
+    }
+
+    /// Fail-fast checks beyond serde's shape validation — same philosophy as
+    /// the no-default loss limits: a bad safety param must die at startup,
+    /// not silently disable a gate at 3am.
+    fn validate(&self) -> Result<()> {
+        if self.categories.is_empty() {
+            bail!("no [[categories]]");
+        }
+        // gate_ret_60s <= 0 gates on every tick (permanent dark);
+        // stale_max_s <= 0 marks the feed stale the instant it ticks.
+        if self.categories.iter().any(|c| c.spot_feed.is_some())
+            && (self.spot.gate_ret_60s <= 0.0 || self.spot.stale_max_s <= 0.0)
+        {
+            bail!(
+                "spot gate params must be positive (gate_ret_60s={}, stale_max_s={})",
+                self.spot.gate_ret_60s,
+                self.spot.stale_max_s
+            );
+        }
+        Ok(())
     }
 }
 
@@ -194,9 +214,33 @@ fn resolve_config_path(name_or_path: &str) -> Result<PathBuf> {
 mod tests {
     use super::*;
 
-    /// Parse from a string so tests don't depend on CWD.
+    /// Parse from a string so tests don't depend on CWD (validated like load).
     fn parse(text: &str) -> Result<Config> {
-        Ok(toml::from_str::<Config>(text)?)
+        let cfg = toml::from_str::<Config>(text)?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    #[test]
+    fn zero_spot_gate_param_fails_when_bound() {
+        let broken = r#"
+            [live]
+            capital = 95.0
+            max_daily_loss = 5.0
+            max_position_value = 40.0
+            stop_loss_threshold = -10.0
+
+            [spot]
+            gate_ret_60s = 0.0
+
+            [[categories]]
+            name = "KXBTCD"
+            spot_feed = "BTC-USD"
+        "#;
+        assert!(parse(broken).is_err());
+        // Same zero param is FINE when no category binds a spot feed
+        let unbound = broken.replace("spot_feed = \"BTC-USD\"", "");
+        assert!(parse(&unbound).is_ok());
     }
 
     const LOWVOL: &str = include_str!("../config/lowvol.toml");
