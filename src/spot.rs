@@ -7,11 +7,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::transport::WsEvent;
 
@@ -20,6 +21,11 @@ const RETAIN_S: f64 = 120.0;
 /// A >2% tick-to-tick jump within this many seconds is a bad print.
 const OUTLIER_JUMP: f64 = 0.02;
 const OUTLIER_WINDOW_S: f64 = 10.0;
+/// Reconnect backoff: initial/max, and how long a connection must live to
+/// count as healthy (resets the backoff instead of compounding it).
+const BACKOFF_INITIAL_S: f64 = 1.0;
+const BACKOFF_MAX_S: f64 = 60.0;
+const BACKOFF_RESET_AFTER_S: f64 = 30.0;
 
 /// Pure rolling state for one spot product. Times are monotonic seconds.
 #[derive(Debug)]
@@ -114,16 +120,21 @@ impl SpotFeed {
     }
 
     pub async fn run(&self, tx: mpsc::Sender<WsEvent>, running: Arc<AtomicBool>) {
-        let mut delay = 1.0f64;
+        let mut delay = BACKOFF_INITIAL_S;
         while running.load(Ordering::Relaxed) {
+            let attempt_start = std::time::Instant::now();
             match self.connect_and_pump(&tx, &running).await {
-                Ok(()) => {
-                    warn!("Spot feed disconnected, reconnecting in {delay:.0}s...");
-                }
+                Ok(()) => warn!("Spot feed disconnected, reconnecting in {delay:.0}s..."),
                 Err(e) => error!("Spot feed error: {e}, reconnecting in {delay:.0}s..."),
             }
+            // A connection that lived a while was healthy — treat the drop as
+            // a fresh blip, not a flapping loop (backoff exists for the latter)
+            delay = if attempt_start.elapsed().as_secs_f64() >= BACKOFF_RESET_AFTER_S {
+                BACKOFF_INITIAL_S
+            } else {
+                (delay * 2.0).min(BACKOFF_MAX_S)
+            };
             tokio::time::sleep(Duration::from_secs_f64(delay)).await;
-            delay = (delay * 2.0).min(60.0);
         }
     }
 
@@ -133,32 +144,48 @@ impl SpotFeed {
         running: &Arc<AtomicBool>,
     ) -> anyhow::Result<()> {
         info!("Connecting to spot feed: {} ({})", self.url, self.product_id);
-        let (ws, _) = tokio_tungstenite::connect_async(&self.url).await?;
+        let (ws, _) = tokio_tungstenite::connect_async(&self.url)
+            .await
+            .context("Spot feed connect")?;
         let (mut sink, mut stream) = ws.split();
         let sub = json!({
             "type": "subscribe",
             "product_ids": [self.product_id],
             "channels": ["ticker"],
         });
-        sink.send(Message::Text(sub.to_string().into())).await?;
+        sink.send(Message::Text(sub.to_string())).await?;
         info!("✓ Spot feed connected");
 
         while let Some(msg) = stream.next().await {
             if !running.load(Ordering::Relaxed) {
                 return Ok(());
             }
-            match msg? {
+            match msg.context("Spot feed read")? {
                 Message::Text(text) => {
                     if let Ok(data) = serde_json::from_str::<Value>(&text) {
                         if let Some(price) = parse_ticker_price(&data) {
-                            if tx.send(WsEvent::Spot { price }).await.is_err() {
+                            // Latest-value stream: drop ticks when the shared
+                            // channel is saturated instead of blocking the
+                            // read loop (a newer tick supersedes anyway)
+                            if let Err(mpsc::error::TrySendError::Closed(_)) =
+                                tx.try_send(WsEvent::Spot { price })
+                            {
                                 return Ok(()); // trader gone = shutdown
+                            }
+                        } else {
+                            match data.get("type").and_then(Value::as_str) {
+                                Some("subscriptions") => info!("✓ Spot feed subscription confirmed"),
+                                Some("error") => error!("Spot feed rejected request: {data}"),
+                                _ => {}
                             }
                         }
                     }
                 }
                 Message::Ping(payload) => sink.send(Message::Pong(payload)).await?,
-                Message::Close(_) => return Ok(()),
+                Message::Close(frame) => {
+                    debug!("Spot feed close frame: {frame:?}");
+                    return Ok(());
+                }
                 _ => {}
             }
         }
