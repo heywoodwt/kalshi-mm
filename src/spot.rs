@@ -20,13 +20,14 @@ pub struct SpotState {
 
 impl SpotState {
     pub fn new(tau_s: f64) -> Self {
+        assert!(tau_s > 0.0, "spot EMA tau_s must be positive (got {tau_s})");
         Self { ticks: VecDeque::new(), ema: None, tau_s }
     }
 
     /// Fold one tick. Returns false when the outlier guard dropped it.
     pub fn on_tick(&mut self, price: f64, now_mono: f64) -> bool {
-        if !(price > 0.0) {
-            return false;
+        if !price.is_finite() || price <= 0.0 {
+            return false; // rejects NaN/inf/non-positive junk prints
         }
         if let Some(&(t_last, p_last)) = self.ticks.back() {
             let fast = now_mono - t_last < OUTLIER_WINDOW_S;
@@ -126,6 +127,12 @@ mod tests {
         // Same jump but 11s after the last ACCEPTED tick: genuine gap, kept
         assert!(s.on_tick(103.0, 11.0));
         assert_eq!(s.latest(), Some(103.0));
+    }
+
+    #[test]
+    #[should_panic(expected = "tau_s must be positive")]
+    fn zero_tau_rejected() {
+        SpotState::new(0.0);
     }
 
     #[test]
