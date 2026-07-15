@@ -58,6 +58,38 @@ impl Default for MmParams {
     }
 }
 
+/// Spot-feed defense parameters (see 2026-07-15-btc-spot-fv-defense spec).
+/// Only consulted for categories that set `spot_feed`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SpotParams {
+    /// Feed silent longer than this (seconds) => bound categories stop quoting.
+    pub stale_max_s: f64,
+    /// |60s spot return| above this => trend gate (cancel + pause quoting).
+    pub gate_ret_60s: f64,
+    /// EMA horizon (seconds) measuring "unabsorbed" spot movement.
+    pub fv_ema_tau_s: f64,
+    /// Clamp on the quote re-centering shift (dollars).
+    pub fv_shift_max: f64,
+    /// Adverse FV shift (dollars) that triggers a SPOT-ADVERSE exit.
+    pub unwind_shift: f64,
+    /// Per-$ probability-density clamp (guards a crossed/junk ladder).
+    pub delta_max: f64,
+}
+
+impl Default for SpotParams {
+    fn default() -> Self {
+        Self {
+            stale_max_s: 10.0,
+            gate_ret_60s: 0.0015,
+            fv_ema_tau_s: 60.0,
+            fv_shift_max: 0.10,
+            unwind_shift: 0.04,
+            delta_max: 0.005,
+        }
+    }
+}
+
 /// Per-category deployment settings (mirrors CategoryConfig in the Python
 /// config modules; defaults from live_config_lowvol.py).
 #[derive(Debug, Clone, Deserialize)]
@@ -73,6 +105,10 @@ pub struct CategoryConfig {
     pub capital_allocation: f64,
     #[serde(default)]
     pub vol_3mo: f64,
+    /// Spot product id (e.g. "BTC-USD") binding this category's ladders to
+    /// the spot-feed defense. None = zero behavior change.
+    #[serde(default)]
+    pub spot_feed: Option<String>,
 }
 
 fn default_max_contracts() -> i64 {
@@ -117,6 +153,8 @@ pub struct Config {
     pub live: LiveConfig,
     #[serde(default)]
     pub mm: MmParams,
+    #[serde(default)]
+    pub spot: SpotParams,
     pub categories: Vec<CategoryConfig>,
 }
 
@@ -217,5 +255,34 @@ mod tests {
             name = "KXADP"
         "#;
         assert!(parse(typo).is_err());
+    }
+
+    #[test]
+    fn spot_params_defaults_and_category_binding() {
+        let text = r#"
+            [live]
+            capital = 95.0
+            max_daily_loss = 5.0
+            max_position_value = 40.0
+            stop_loss_threshold = -10.0
+
+            [[categories]]
+            name = "KXBTCD"
+            spot_feed = "BTC-USD"
+
+            [[categories]]
+            name = "KXWCGAME"
+        "#;
+        let cfg = parse(text).unwrap();
+        // Defaults from the spec
+        assert_eq!(cfg.spot.stale_max_s, 10.0);
+        assert_eq!(cfg.spot.gate_ret_60s, 0.0015);
+        assert_eq!(cfg.spot.fv_ema_tau_s, 60.0);
+        assert_eq!(cfg.spot.fv_shift_max, 0.10);
+        assert_eq!(cfg.spot.unwind_shift, 0.04);
+        assert_eq!(cfg.spot.delta_max, 0.005);
+        // Binding is per-category and optional
+        assert_eq!(cfg.categories[0].spot_feed.as_deref(), Some("BTC-USD"));
+        assert_eq!(cfg.categories[1].spot_feed, None);
     }
 }
