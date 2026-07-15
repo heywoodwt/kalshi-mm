@@ -8,6 +8,7 @@ pub mod config;
 pub mod engine;
 pub mod executor;
 pub mod features;
+pub mod ladder;
 pub mod model;
 pub mod paper;
 pub mod spot;
