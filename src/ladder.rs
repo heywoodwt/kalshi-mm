@@ -12,7 +12,7 @@ pub fn parse_strike(ticker: &str) -> Option<(String, f64)> {
     let mut parts = ticker.split('-');
     let _series = parts.next()?;
     let expiry = parts.next()?;
-    let strike = parts.next()?.strip_prefix('T')?.parse::<f64>().ok()?;
+    let strike = parts.next()?.strip_prefix('T')?.parse::<f64>().ok().filter(|k| k.is_finite())?;
     if parts.next().is_some() || expiry.is_empty() {
         return None;
     }
@@ -43,7 +43,7 @@ impl Ladders {
         out
     }
 
-    /// Central-difference delta (prob per $) for `ticker`, in (0, delta_max].
+    /// Central-difference delta (prob per $) for `ticker`, in [0, delta_max].
     /// One-sided at ladder edges. None = orphan/junk (single strike, invalid
     /// neighbor book, crossed mids, zero width): the caller must NOT quote
     /// un-shifted into a moving market for these.
@@ -97,6 +97,8 @@ mod tests {
         assert_eq!(parse_strike("KXBTCD-26JUL1517-B64000"), None); // bracket leg
         assert_eq!(parse_strike("KXWCGAME-26JUL15"), None); // no strike leg
         assert_eq!(parse_strike("garbage"), None);
+        assert_eq!(parse_strike("KXBTCD-26JUL1517-Tnan"), None); // NaN strike = junk
+        assert_eq!(parse_strike("KXBTCD-26JUL1517-Tinf"), None);
     }
 
     #[test]
