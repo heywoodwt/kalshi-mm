@@ -176,9 +176,13 @@ struct Trader<M: MarketApi> {
     spot_bound: HashSet<String>,
     /// Trend-gate edge detection for the one-shot cancel.
     spot_gate_on: bool,
-    /// ticker -> next allowed unwind evaluation (mono s): 1s after an
-    /// evaluation, 10s after an actually-fired IOC (fills-poll safety).
+    /// ticker -> next allowed unwind evaluation (mono s; 1s throttle).
     spot_unwind_next: HashMap<String, f64>,
+    /// ticker -> mono deadline after a FIRED unwind IOC. Until it passes,
+    /// neither the unwind nor the mid-based stop may fire again: the IOC's
+    /// fill may be unbooked for up to 5s (fills poll), and a second
+    /// full-size exit would drive the position through flat into a reversal.
+    spot_unwind_fired_until: HashMap<String, f64>,
 }
 
 async fn run_trader<M: MarketApi>(
@@ -207,6 +211,7 @@ async fn run_trader<M: MarketApi>(
         spot_bound,
         spot_gate_on: false,
         spot_unwind_next: HashMap::new(),
+        spot_unwind_fired_until: HashMap::new(),
     };
 
     trader.optimize_startup_orders().await;
@@ -630,7 +635,9 @@ impl<M: MarketApi> Trader<M> {
             .collect();
         for ticker in tickers {
             let next = self.spot_unwind_next.get(&ticker).copied().unwrap_or(f64::NEG_INFINITY);
-            if now_mono < next {
+            let fired =
+                self.spot_unwind_fired_until.get(&ticker).copied().unwrap_or(f64::NEG_INFINITY);
+            if now_mono < next || now_mono < fired {
                 continue;
             }
             self.spot_unwind_next.insert(ticker.clone(), now_mono + 1.0);
@@ -642,7 +649,8 @@ impl<M: MarketApi> Trader<M> {
             };
             info!("EXIT (SPOT-ADVERSE): {ticker} inv={} fv_shift={shift:+.3}", ts.position);
             executor::apply_exit_plan(&self.api, &category, &ticker, &plan).await;
-            self.spot_unwind_next.insert(ticker.clone(), now_mono + UNWIND_REFIRE_HOLDOFF_S);
+            self.spot_unwind_fired_until
+                .insert(ticker.clone(), now_mono + UNWIND_REFIRE_HOLDOFF_S);
         }
     }
 
@@ -834,6 +842,14 @@ impl<M: MarketApi> Trader<M> {
             .map(|(t, _)| t.clone())
             .collect();
         for ticker in tickers {
+            // A spot unwind IOC may be filled-but-unbooked (5s fills poll):
+            // firing the mid-based stop inside the holdoff would double-exit
+            // the already-flattened position
+            let fired =
+                self.spot_unwind_fired_until.get(&ticker).copied().unwrap_or(f64::NEG_INFINITY);
+            if mono_now() < fired {
+                continue;
+            }
             let ts = &self.state.tickers[&ticker];
             let Some(plan) = exit_decision(ts, now_s) else { continue };
             let mid = ts.book.mid().unwrap_or(0.0);
