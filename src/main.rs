@@ -533,7 +533,16 @@ impl<M: MarketApi> Trader<M> {
         let open_orders = self.state.open_order_count();
         let backoff = self.state.balance_backoff_until;
         let ts = self.state.ticker(ticker, &category);
-        let plan = plan_quotes(action, ts, &self.cfg.mm, max_inventory, open_orders, backoff, mono_now());
+        let plan = plan_quotes(
+            action,
+            0.0,
+            ts,
+            &self.cfg.mm,
+            max_inventory,
+            open_orders,
+            backoff,
+            mono_now(),
+        );
         if let Some(plan) = plan {
             executor::apply_quote_plan(&self.api, &self.cfg.mm, &category, ticker, &plan,
                                        &mut self.state, mono_now())

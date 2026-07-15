@@ -74,8 +74,11 @@ pub struct ExitPlan {
 ///   7. tick-move check — keep resting orders (and FIFO queue priority)
 ///      unless the desired price moved >= 1 tick
 ///   8. per-side inventory caps
+///   9. spot fair-value shift recenters quotes (caller-clamped; 0.0 = off)
+#[allow(clippy::too_many_arguments)] // mirrors _execute_action's parameter list 1:1
 pub fn plan_quotes(
     action: [f64; 2],
+    fv_shift: f64,
     ts: &mut TickerState,
     mm: &MmParams,
     max_inventory: i64,
@@ -111,8 +114,13 @@ pub fn plan_quotes(
     }
 
     let (half_spread, skew) = scale_action(action);
-    let mut our_bid = mid - half_spread + skew;
-    let mut our_ask = mid + half_spread + skew;
+    // Spot fair-value re-centering (0.0 for categories without a spot feed).
+    // The caller clamps to ±fv_shift_max; quote band above uses the RAW mid
+    // (collateral concern is the actual market), and every later safety
+    // layer (touch clamp, fee edge, tick-move) applies to the shifted quotes.
+    let center = mid + fv_shift;
+    let mut our_bid = center - half_spread + skew;
+    let mut our_ask = center + half_spread + skew;
 
     let tick = ts.tick;
     let supports_subpenny = tick <= 0.001;
@@ -266,7 +274,7 @@ mod tests {
     #[test]
     fn plan_quotes_basic() {
         let mut ts = wide_ts();
-        let plan = plan_quotes(ACTION, &mut ts, &mm(), 5, 0, 0.0, 100.0).unwrap();
+        let plan = plan_quotes(ACTION, 0.0, &mut ts, &mm(), 5, 0, 0.0, 100.0).unwrap();
         assert_eq!(plan.bid_cents, 27.0);
         assert_eq!(plan.ask_cents, 53.0);
         assert!(plan.place_bid && plan.place_ask);
@@ -278,15 +286,15 @@ mod tests {
     #[test]
     fn throttle_blocks_within_1s() {
         let mut ts = wide_ts();
-        assert!(plan_quotes(ACTION, &mut ts, &mm(), 5, 0, 0.0, 100.0).is_some());
-        assert!(plan_quotes(ACTION, &mut ts, &mm(), 5, 0, 0.0, 100.5).is_none());
-        assert!(plan_quotes(ACTION, &mut ts, &mm(), 5, 0, 0.0, 101.1).is_some());
+        assert!(plan_quotes(ACTION, 0.0, &mut ts, &mm(), 5, 0, 0.0, 100.0).is_some());
+        assert!(plan_quotes(ACTION, 0.0, &mut ts, &mm(), 5, 0, 0.0, 100.5).is_none());
+        assert!(plan_quotes(ACTION, 0.0, &mut ts, &mm(), 5, 0, 0.0, 101.1).is_some());
     }
 
     #[test]
     fn balance_backoff_blocks() {
         let mut ts = wide_ts();
-        assert!(plan_quotes(ACTION, &mut ts, &mm(), 5, 0, 200.0, 100.0).is_none());
+        assert!(plan_quotes(ACTION, 0.0, &mut ts, &mm(), 5, 0, 200.0, 100.0).is_none());
         // The throttle clock still advanced (same ordering as Python)
         assert_eq!(ts.last_quote_time, 100.0);
     }
@@ -297,17 +305,17 @@ mod tests {
         // bid 0.965, ask 0.98 -> mid 0.9725 > 0.95
         ts.book
             .load_snapshot(&json!({"yes": [[0.965, 10]], "no": [[0.02, 10]]}));
-        assert!(plan_quotes(ACTION, &mut ts, &mm(), 5, 0, 0.0, 100.0).is_none());
+        assert!(plan_quotes(ACTION, 0.0, &mut ts, &mm(), 5, 0, 0.0, 100.0).is_none());
     }
 
     #[test]
     fn order_budget_exempts_ever_quoted() {
         let cap = mm().max_open_orders;
         let mut ts = wide_ts();
-        assert!(plan_quotes(ACTION, &mut ts, &mm(), 5, cap, 0.0, 100.0).is_none());
+        assert!(plan_quotes(ACTION, 0.0, &mut ts, &mm(), 5, cap, 0.0, 100.0).is_none());
         let mut ts2 = wide_ts();
         ts2.ever_quoted = true; // already-quoted tickers keep refreshing
-        assert!(plan_quotes(ACTION, &mut ts2, &mm(), 5, cap, 0.0, 100.0).is_some());
+        assert!(plan_quotes(ACTION, 0.0, &mut ts2, &mm(), 5, cap, 0.0, 100.0).is_some());
     }
 
     #[test]
@@ -316,7 +324,7 @@ mod tests {
         // Market bid 0.48 / ask 0.50: max passive spread ~2c, fees eat it
         ts.book
             .load_snapshot(&json!({"yes": [[0.48, 50]], "no": [[0.50, 40]]}));
-        assert!(plan_quotes([-1.0, 0.0], &mut ts, &mm(), 5, 0, 0.0, 100.0).is_none());
+        assert!(plan_quotes([-1.0, 0.0], 0.0, &mut ts, &mm(), 5, 0, 0.0, 100.0).is_none());
     }
 
     #[test]
@@ -326,7 +334,7 @@ mod tests {
         ts.quoted_ask = Some(0.53);
         ts.bid_order_id = Some("b1".into());
         ts.ask_order_id = Some("a1".into());
-        assert!(plan_quotes(ACTION, &mut ts, &mm(), 5, 0, 0.0, 100.0).is_none());
+        assert!(plan_quotes(ACTION, 0.0, &mut ts, &mm(), 5, 0, 0.0, 100.0).is_none());
     }
 
     #[test]
@@ -336,7 +344,7 @@ mod tests {
         ts.quoted_ask = Some(0.60);
         ts.bid_order_id = Some("b1".into());
         ts.ask_order_id = Some("a1".into());
-        let plan = plan_quotes(ACTION, &mut ts, &mm(), 5, 0, 0.0, 100.0).unwrap();
+        let plan = plan_quotes(ACTION, 0.0, &mut ts, &mm(), 5, 0, 0.0, 100.0).unwrap();
         let mut ids = plan.cancel_ids.clone();
         ids.sort();
         assert_eq!(ids, vec!["a1".to_string(), "b1".to_string()]);
@@ -346,13 +354,13 @@ mod tests {
     fn inventory_cap_blocks_one_side() {
         let mut ts = wide_ts();
         ts.position = 5;
-        let plan = plan_quotes(ACTION, &mut ts, &mm(), 5, 0, 0.0, 100.0).unwrap();
+        let plan = plan_quotes(ACTION, 0.0, &mut ts, &mm(), 5, 0, 0.0, 100.0).unwrap();
         assert!(!plan.place_bid); // |5+1| > 5
         assert!(plan.place_ask); // |5-1| <= 5
         // Short side mirror
         let mut ts2 = wide_ts();
         ts2.position = -5;
-        let plan2 = plan_quotes(ACTION, &mut ts2, &mm(), 5, 0, 0.0, 100.0).unwrap();
+        let plan2 = plan_quotes(ACTION, 0.0, &mut ts2, &mm(), 5, 0, 0.0, 100.0).unwrap();
         assert!(plan2.place_bid && !plan2.place_ask);
     }
 
@@ -361,9 +369,36 @@ mod tests {
         let mut ts = wide_ts();
         ts.tick = 0.001;
         // action [0,0]: half 0.255 -> bid .145+.001=.146, ask .655-.001=.654
-        let plan = plan_quotes([0.0, 0.0], &mut ts, &mm(), 5, 0, 0.0, 100.0).unwrap();
+        let plan = plan_quotes([0.0, 0.0], 0.0, &mut ts, &mm(), 5, 0, 0.0, 100.0).unwrap();
         assert!((plan.bid_cents - 14.6).abs() < 1e-9);
         assert!((plan.ask_cents - 65.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fv_shift_recenters_quotes() {
+        // Unshifted (wide_ts, ACTION): bid 27 / ask 53 around mid 0.40.
+        // Shift +0.10: center 0.50 -> bid 37 / ask 63.
+        let mut ts = wide_ts();
+        let plan = plan_quotes(ACTION, 0.10, &mut ts, &mm(), 5, 0, 0.0, 100.0).unwrap();
+        assert_eq!(plan.bid_cents, 37.0);
+        assert_eq!(plan.ask_cents, 63.0);
+        // Negative shift leans the other way
+        let mut ts = wide_ts();
+        let plan = plan_quotes(ACTION, -0.10, &mut ts, &mm(), 5, 0, 0.0, 100.0).unwrap();
+        assert_eq!(plan.bid_cents, 17.0);
+        assert_eq!(plan.ask_cents, 43.0);
+    }
+
+    #[test]
+    fn fv_shift_never_crosses_the_touch() {
+        // Tight model spread + big up-shift would cross best_ask 0.50 without
+        // the clamp; the existing clamp_quotes layer must still hold.
+        let mut ts = wide_ts(); // bid 0.30 / ask 0.50
+        if let Some(plan) = plan_quotes([-1.0, 0.0], 0.10, &mut ts, &mm(), 5, 0, 0.0, 100.0) {
+            assert!(plan.bid_cents < 50.0, "bid {} reached the ask touch", plan.bid_cents);
+            assert!(plan.ask_cents > 30.0, "ask {} reached the bid touch", plan.ask_cents);
+            assert!(plan.bid_cents < plan.ask_cents);
+        } // None (fee gate) is also acceptable — the invariant is "no crossing"
     }
 
     fn exit_ts(position: i64, entry: f64) -> TickerState {

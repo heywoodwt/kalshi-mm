@@ -237,7 +237,7 @@ fn quote_plan_matches_python() {
             let action = [f(&action_arr[0]), f(&action_arr[1])];
             let now_mono = f(&step_in["now_mono"]);
 
-            let plan = plan_quotes(action, &mut ts, &mm, MAX_INVENTORY, open_order_count, backoff_until, now_mono);
+            let plan = plan_quotes(action, 0.0, &mut ts, &mm, MAX_INVENTORY, open_order_count, backoff_until, now_mono);
             let skipped = step_out["skipped"].as_bool().unwrap();
 
             // plan_quotes is pure (no I/O); in production executor::apply_quote_plan
