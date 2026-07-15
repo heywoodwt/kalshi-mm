@@ -234,11 +234,17 @@ pub fn exit_decision(ts: &TickerState, now_s: f64) -> Option<ExitPlan> {
 }
 
 /// Spot-adverse unwind: the exchange book hasn't re-priced yet, but the
-/// spot-implied fair value moved against our inventory by >= threshold.
+/// spot-implied fair value moved against our inventory by MORE than the
+/// threshold (strictly — exactly-at-threshold does not trigger).
 /// Exits cross the CURRENT (still-stale) book — we leave near the old
 /// price instead of being last out after the mid catches up. Runs on spot
 /// ticks (sub-second), unlike the 10s mid-based exit_decision.
 pub fn spot_unwind_decision(ts: &TickerState, fv_shift: f64, unwind_shift: f64) -> Option<ExitPlan> {
+    // NaN comparisons are all false, so without this guard a NaN shift
+    // would SKIP the no-trigger check below and fire a live crossing order
+    if !fv_shift.is_finite() {
+        return None;
+    }
     if ts.position == 0 || !ts.book.is_valid() {
         return None;
     }
@@ -530,6 +536,8 @@ mod tests {
         assert!(spot_unwind_decision(&exit_ts(1, 0.50), -0.03, 0.04).is_none());
         // Exactly AT threshold: strict inequality, no trigger
         assert!(spot_unwind_decision(&exit_ts(1, 0.50), -0.04, 0.04).is_none());
+        // NaN shift must never fire a crossing order
+        assert!(spot_unwind_decision(&exit_ts(1, 0.50), f64::NAN, 0.04).is_none());
         // Shift in our favor
         assert!(spot_unwind_decision(&exit_ts(1, 0.50), 0.10, 0.04).is_none());
         // Flat
