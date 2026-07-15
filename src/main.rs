@@ -176,8 +176,9 @@ struct Trader<M: MarketApi> {
     spot_bound: HashSet<String>,
     /// Trend-gate edge detection for the one-shot cancel.
     spot_gate_on: bool,
-    /// ticker -> last unwind evaluation (mono s), 1/s throttle.
-    spot_unwind_last: HashMap<String, f64>,
+    /// ticker -> next allowed unwind evaluation (mono s): 1s after an
+    /// evaluation, 10s after an actually-fired IOC (fills-poll safety).
+    spot_unwind_next: HashMap<String, f64>,
 }
 
 async fn run_trader<M: MarketApi>(
@@ -205,7 +206,7 @@ async fn run_trader<M: MarketApi>(
         ladders: Ladders::default(),
         spot_bound,
         spot_gate_on: false,
-        spot_unwind_last: HashMap::new(),
+        spot_unwind_next: HashMap::new(),
     };
 
     trader.optimize_startup_orders().await;
@@ -509,7 +510,12 @@ impl<M: MarketApi> Trader<M> {
                     }
                 }
                 _ = sync_tick.tick() => self.sync_positions().await,
-                _ = exit_tick.tick() => self.check_exits().await,
+                _ = exit_tick.tick() => {
+                    // Timer path for the gate: a silently-dead spot feed
+                    // produces no ticks, so this is what pulls resting quotes
+                    self.update_spot_gate().await;
+                    self.check_exits().await;
+                }
                 _ = daily_tick.tick() => self.maybe_daily_reset(),
                 _ = hourly_tick.tick() => self.hourly_report(),
                 _ = poll_tick.tick(), if !use_ws => self.rest_poll().await,
@@ -559,6 +565,20 @@ impl<M: MarketApi> Trader<M> {
         if !self.spot.on_tick(price, now) {
             return; // outlier dropped
         }
+        self.update_spot_gate().await;
+        self.check_spot_unwind(now).await;
+    }
+
+    /// Evaluate the gate and fire the one-shot cancel on its rising edge.
+    /// Called on every spot tick AND on the 10s exit timer: a silently-dead
+    /// feed produces no ticks, so without the timer path a staleness gate
+    /// would never pull resting quotes — they'd sit as pickoff bait for the
+    /// whole outage. Staleness must fail safe even when no data arrives.
+    async fn update_spot_gate(&mut self) {
+        if self.spot_bound.is_empty() {
+            return;
+        }
+        let now = mono_now();
         let gated = self.spot_gated(now);
         if gated && !self.spot_gate_on {
             let ret = self.spot.ret(60.0, now).unwrap_or(0.0);
@@ -569,7 +589,6 @@ impl<M: MarketApi> Trader<M> {
             info!("SPOT GATE OFF (60s ret {:+.3}%)", ret * 100.0);
         }
         self.spot_gate_on = gated;
-        self.check_spot_unwind(now).await;
     }
 
     /// One-shot on the gate's rising edge: resting quotes are pickoff bait.
@@ -592,6 +611,13 @@ impl<M: MarketApi> Trader<M> {
     /// SPOT-ADVERSE exits, evaluated on spot ticks (1/s per ticker). Runs
     /// even for halted categories — unwinding REDUCES risk.
     async fn check_spot_unwind(&mut self, now_mono: f64) {
+        // Local position only updates when the 5s fills poll books the fill.
+        // Re-evaluating at 1s would re-fire a full-size IOC at the (stale
+        // but fillable) book up to ~4 more times before the first fill
+        // lands — overshooting a long straight through flat into a short.
+        // 10s matches check_exits' cadence, which is safe against the 5s
+        // poll by construction.
+        const UNWIND_REFIRE_HOLDOFF_S: f64 = 10.0;
         if self.spot.is_stale(now_mono, self.cfg.spot.stale_max_s) {
             return;
         }
@@ -603,11 +629,11 @@ impl<M: MarketApi> Trader<M> {
             .map(|(t, _)| t.clone())
             .collect();
         for ticker in tickers {
-            let last = self.spot_unwind_last.get(&ticker).copied().unwrap_or(f64::NEG_INFINITY);
-            if now_mono - last < 1.0 {
+            let next = self.spot_unwind_next.get(&ticker).copied().unwrap_or(f64::NEG_INFINITY);
+            if now_mono < next {
                 continue;
             }
-            self.spot_unwind_last.insert(ticker.clone(), now_mono);
+            self.spot_unwind_next.insert(ticker.clone(), now_mono + 1.0);
             let category = self.state.tickers[&ticker].category.clone();
             let Some(shift) = self.fv_shift_for(&ticker, &category) else { continue };
             let ts = &self.state.tickers[&ticker];
@@ -616,6 +642,7 @@ impl<M: MarketApi> Trader<M> {
             };
             info!("EXIT (SPOT-ADVERSE): {ticker} inv={} fv_shift={shift:+.3}", ts.position);
             executor::apply_exit_plan(&self.api, &category, &ticker, &plan).await;
+            self.spot_unwind_next.insert(ticker.clone(), now_mono + UNWIND_REFIRE_HOLDOFF_S);
         }
     }
 
