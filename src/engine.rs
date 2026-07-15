@@ -233,6 +233,39 @@ pub fn exit_decision(ts: &TickerState, now_s: f64) -> Option<ExitPlan> {
     }
 }
 
+/// Spot-adverse unwind: the exchange book hasn't re-priced yet, but the
+/// spot-implied fair value moved against our inventory by >= threshold.
+/// Exits cross the CURRENT (still-stale) book — we leave near the old
+/// price instead of being last out after the mid catches up. Runs on spot
+/// ticks (sub-second), unlike the 10s mid-based exit_decision.
+pub fn spot_unwind_decision(ts: &TickerState, fv_shift: f64, unwind_shift: f64) -> Option<ExitPlan> {
+    if ts.position == 0 || !ts.book.is_valid() {
+        return None;
+    }
+    // signum * shift < -threshold  <=>  FV moved against the inventory
+    // (per-contract, so multi-lot positions unwind at the same threshold)
+    if ts.position.signum() as f64 * fv_shift >= -unwind_shift {
+        return None;
+    }
+    let best_bid = ts.book.best_bid()?;
+    let best_ask = ts.book.best_ask()?;
+    if ts.position > 0 {
+        Some(ExitPlan {
+            side: "sell",
+            price_cents: round_dp(best_bid * 100.0, 1),
+            size: ts.position,
+            reason: "SPOT-ADVERSE",
+        })
+    } else {
+        Some(ExitPlan {
+            side: "buy",
+            price_cents: round_dp(best_ask * 100.0, 1),
+            size: ts.position.abs(),
+            reason: "SPOT-ADVERSE",
+        })
+    }
+}
+
 /// Account-level risk gates. Returns (ok_to_quote, halt_reason).
 ///
 /// halt_reason = Some(..) means the trader must halt entirely (cancel all
@@ -475,5 +508,29 @@ mod tests {
         big.entry_price = Some(0.50);
         // Position cap blocks quoting but does NOT halt
         assert_eq!(check_risk_limits(&state, &live, None), (false, None));
+    }
+
+    #[test]
+    fn spot_unwind_long_and_short() {
+        // Long 1, FV shifted -0.05 against us (threshold 0.04): sell at bid
+        let ts = exit_ts(1, 0.50);
+        let plan = spot_unwind_decision(&ts, -0.05, 0.04).unwrap();
+        assert_eq!((plan.side, plan.size, plan.reason), ("sell", 1, "SPOT-ADVERSE"));
+        assert!((plan.price_cents - 40.0).abs() < 1e-9);
+        // Short 2, FV shifted +0.05 against us: buy back at ask
+        let ts = exit_ts(-2, 0.50);
+        let plan = spot_unwind_decision(&ts, 0.05, 0.04).unwrap();
+        assert_eq!((plan.side, plan.size), ("buy", 2));
+        assert!((plan.price_cents - 42.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn spot_unwind_no_trigger_cases() {
+        // Below threshold
+        assert!(spot_unwind_decision(&exit_ts(1, 0.50), -0.03, 0.04).is_none());
+        // Shift in our favor
+        assert!(spot_unwind_decision(&exit_ts(1, 0.50), 0.10, 0.04).is_none());
+        // Flat
+        assert!(spot_unwind_decision(&exit_ts(0, 0.50), -0.10, 0.04).is_none());
     }
 }
