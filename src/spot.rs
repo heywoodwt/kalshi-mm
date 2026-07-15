@@ -123,10 +123,7 @@ impl SpotFeed {
         let mut delay = BACKOFF_INITIAL_S;
         while running.load(Ordering::Relaxed) {
             let attempt_start = std::time::Instant::now();
-            match self.connect_and_pump(&tx, &running).await {
-                Ok(()) => warn!("Spot feed disconnected, reconnecting in {delay:.0}s..."),
-                Err(e) => error!("Spot feed error: {e}, reconnecting in {delay:.0}s..."),
-            }
+            let result = self.connect_and_pump(&tx, &running).await;
             // A connection that lived a while was healthy — treat the drop as
             // a fresh blip, not a flapping loop (backoff exists for the latter)
             delay = if attempt_start.elapsed().as_secs_f64() >= BACKOFF_RESET_AFTER_S {
@@ -134,6 +131,10 @@ impl SpotFeed {
             } else {
                 (delay * 2.0).min(BACKOFF_MAX_S)
             };
+            match result {
+                Ok(()) => warn!("Spot feed disconnected, reconnecting in {delay:.0}s..."),
+                Err(e) => error!("Spot feed error: {e}, reconnecting in {delay:.0}s..."),
+            }
             tokio::time::sleep(Duration::from_secs_f64(delay)).await;
         }
     }
