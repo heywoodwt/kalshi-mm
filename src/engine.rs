@@ -59,7 +59,7 @@ pub struct ExitPlan {
     pub side: &'static str, // "buy" | "sell"
     pub price_cents: f64,
     pub size: i64,
-    pub reason: &'static str, // "STOP-LOSS" | "EXPIRY"
+    pub reason: &'static str, // "STOP-LOSS" | "EXPIRY" | "SPOT-ADVERSE"
 }
 
 /// Model action -> quote plan, or None wherever the Python returned early.
@@ -528,6 +528,8 @@ mod tests {
     fn spot_unwind_no_trigger_cases() {
         // Below threshold
         assert!(spot_unwind_decision(&exit_ts(1, 0.50), -0.03, 0.04).is_none());
+        // Exactly AT threshold: strict inequality, no trigger
+        assert!(spot_unwind_decision(&exit_ts(1, 0.50), -0.04, 0.04).is_none());
         // Shift in our favor
         assert!(spot_unwind_decision(&exit_ts(1, 0.50), 0.10, 0.04).is_none());
         // Flat
