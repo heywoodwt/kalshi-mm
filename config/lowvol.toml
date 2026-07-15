@@ -30,3 +30,7 @@ vol_3mo = 0.021
 [[categories]]
 name = "KXBTCD"
 vol_3mo = 0.022
+# BTC trends (see 2026-07-15 spot-fv-defense spec): bind to the Coinbase
+# spot feed so quotes re-center on spot-implied fair value, fast moves gate
+# quoting, and adverse inventory unwinds before the book catches up.
+spot_feed = "BTC-USD"
