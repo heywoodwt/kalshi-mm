@@ -32,6 +32,8 @@ pub enum WsEvent {
     Book { ticker: String, msg: Value },
     /// Public trade print (feeds obs [9] volume and [16] flow).
     Trade { ticker: String, msg: Value },
+    /// External spot price tick (Coinbase), for spot-bound categories.
+    Spot { price: f64 },
 }
 
 pub struct WsClient {

@@ -436,6 +436,7 @@ impl<M: MarketApi> Trader<M> {
                 Some(event) = rx.recv(), if use_ws => match event {
                     WsEvent::Book { ticker, msg } => self.on_book_update(&ticker, &msg).await,
                     WsEvent::Trade { ticker, msg } => self.on_trade(&ticker, &msg),
+                    WsEvent::Spot { .. } => {} // wired in Task 7
                 },
                 _ = fills_tick.tick() => {
                     // Page through the cursor so a burst of >200 fills in the

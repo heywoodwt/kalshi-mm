@@ -3,6 +3,17 @@
 //! the WS task mirrors transport.rs's reconnect pattern.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use futures_util::{SinkExt, StreamExt};
+use serde_json::{json, Value};
+use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::Message;
+use tracing::{error, info, warn};
+
+use crate::transport::WsEvent;
 
 /// Ticks older than this are pruned (must exceed the largest ret() window).
 const RETAIN_S: f64 = 120.0;
@@ -76,6 +87,85 @@ impl SpotState {
     }
 }
 
+pub const COINBASE_WS_URL: &str = "wss://ws-feed.exchange.coinbase.com";
+
+/// Price from a Coinbase `ticker` channel message, or None for anything else.
+pub fn parse_ticker_price(msg: &Value) -> Option<f64> {
+    if msg.get("type").and_then(Value::as_str) != Some("ticker") {
+        return None;
+    }
+    match msg.get("price")? {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => s.parse().ok(),
+        _ => None,
+    }
+}
+
+/// Public (unauthenticated) spot feed. Same lifecycle as WsClient: pump
+/// until drop, reconnect with backoff, forever while `running`.
+pub struct SpotFeed {
+    url: String,
+    product_id: String,
+}
+
+impl SpotFeed {
+    pub fn new(url: &str, product_id: &str) -> Self {
+        Self { url: url.to_string(), product_id: product_id.to_string() }
+    }
+
+    pub async fn run(&self, tx: mpsc::Sender<WsEvent>, running: Arc<AtomicBool>) {
+        let mut delay = 1.0f64;
+        while running.load(Ordering::Relaxed) {
+            match self.connect_and_pump(&tx, &running).await {
+                Ok(()) => {
+                    warn!("Spot feed disconnected, reconnecting in {delay:.0}s...");
+                }
+                Err(e) => error!("Spot feed error: {e}, reconnecting in {delay:.0}s..."),
+            }
+            tokio::time::sleep(Duration::from_secs_f64(delay)).await;
+            delay = (delay * 2.0).min(60.0);
+        }
+    }
+
+    async fn connect_and_pump(
+        &self,
+        tx: &mpsc::Sender<WsEvent>,
+        running: &Arc<AtomicBool>,
+    ) -> anyhow::Result<()> {
+        info!("Connecting to spot feed: {} ({})", self.url, self.product_id);
+        let (ws, _) = tokio_tungstenite::connect_async(&self.url).await?;
+        let (mut sink, mut stream) = ws.split();
+        let sub = json!({
+            "type": "subscribe",
+            "product_ids": [self.product_id],
+            "channels": ["ticker"],
+        });
+        sink.send(Message::Text(sub.to_string().into())).await?;
+        info!("✓ Spot feed connected");
+
+        while let Some(msg) = stream.next().await {
+            if !running.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            match msg? {
+                Message::Text(text) => {
+                    if let Ok(data) = serde_json::from_str::<Value>(&text) {
+                        if let Some(price) = parse_ticker_price(&data) {
+                            if tx.send(WsEvent::Spot { price }).await.is_err() {
+                                return Ok(()); // trader gone = shutdown
+                            }
+                        }
+                    }
+                }
+                Message::Ping(payload) => sink.send(Message::Pong(payload)).await?,
+                Message::Close(_) => return Ok(()),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,5 +232,16 @@ mod tests {
             s.on_tick(100.0, i as f64);
         }
         assert!(s.len() <= 122); // 120s retention + endpoints
+    }
+
+    #[test]
+    fn parses_coinbase_ticker_messages() {
+        use serde_json::json;
+        let m = json!({"type": "ticker", "product_id": "BTC-USD", "price": "64123.45"});
+        assert_eq!(parse_ticker_price(&m), Some(64123.45));
+        let m = json!({"type": "ticker", "price": 64123.45}); // numeric price tolerated
+        assert_eq!(parse_ticker_price(&m), Some(64123.45));
+        assert_eq!(parse_ticker_price(&json!({"type": "subscriptions"})), None);
+        assert_eq!(parse_ticker_price(&json!({"type": "ticker", "price": "junk"})), None);
     }
 }
