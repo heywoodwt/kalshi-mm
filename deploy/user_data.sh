@@ -1,13 +1,16 @@
 #!/bin/bash
-# EC2 User Data Script - initialize instance for the kalshi-mm bot.
-# Builds happen ON the instance (not cross-compiled) so the ONNX Runtime
-# binary ort's download-binaries feature fetches matches this OS/arch.
-
+# EC2 User Data — prepare the instance to run kalshi-mm as a Docker container.
+#
+# We build the image ON the instance (inside rust:trixie via the Dockerfile),
+# NOT with a native `cargo build`. Amazon Linux 2023 ships glibc 2.34, but the
+# prebuilt ONNX Runtime that ort's download-binaries feature fetches references
+# __isoc23_strtoull / __isoc23_strtol — symbols that only exist in glibc >= 2.38
+# — so a native build fails at link (rust-lld: undefined symbol). The Docker
+# build runs inside trixie (glibc 2.41), so the host's old glibc is irrelevant.
+set -x
 yum update -y
-yum install -y gcc git
+yum install -y docker git
+systemctl enable --now docker
+usermod -aG docker ec2-user
 
-# Install as ec2-user (not root) so `source ~/.cargo/env` in
-# start_live_trading.sh finds the toolchain.
-sudo -u ec2-user bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y'
-
-echo "Instance initialized for kalshi-mm"
+echo "Instance initialized for kalshi-mm (docker)"

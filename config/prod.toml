@@ -1,0 +1,24 @@
+# Production deployment — scoped to KXBTCD + KXWCGAME only.
+# Mirrors lowvol.toml risk params; trades only the two requested categories.
+# Deploy ONLY where the edge is proven: MM profits on low-vol mean-reverting
+# categories (vol_3mo < 0.05) and loses on trending ones.
+
+[live]
+capital = 95.00
+max_daily_loss = 5.00
+max_position_value = 40.00
+stop_loss_threshold = -10.00
+checkpoint_prefix = "realistic_20dim"
+# Per-category kill switch: stop quoting a category after 3 losing
+# round-trips in a row.
+halt_on_consecutive_losses = 3
+
+# [mm] omitted — all MmParams defaults apply.
+
+[[categories]]
+name = "KXBTCD"
+vol_3mo = 0.022
+
+[[categories]]
+name = "KXWCGAME"
+vol_3mo = 0.019

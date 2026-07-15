@@ -8,3 +8,7 @@ target/
 /models/*
 !/models/realistic_20dim_*.onnx
 .env
+# Live Kalshi API private key(s) — KALSHI_API_SECRET points at one of these.
+# NEVER commit. (The bot's key is shipped to the instance out-of-band.)
+/mm_ppo_bot.txt
+*.pem
