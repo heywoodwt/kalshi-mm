@@ -190,6 +190,7 @@ impl KalshiClient {
         min_ts: i64,
         limit: u32,
         cursor: Option<&str>,
+        ticker: Option<&str>,
     ) -> Result<Value, ApiError> {
         let mut params = vec![
             ("limit", limit.to_string()),
@@ -197,6 +198,9 @@ impl KalshiClient {
         ];
         if let Some(c) = cursor {
             params.push(("cursor", c.to_string()));
+        }
+        if let Some(t) = ticker {
+            params.push(("ticker", t.to_string()));
         }
         self.request(reqwest::Method::GET, "/portfolio/fills", &params, None).await
     }
@@ -305,6 +309,7 @@ pub trait MarketApi: OrderApi {
         min_ts: i64,
         limit: u32,
         cursor: Option<&str>,
+        ticker: Option<&str>,
     ) -> impl std::future::Future<Output = Result<Value, ApiError>> + Send;
     fn get_orders(
         &self,
@@ -352,8 +357,14 @@ impl MarketApi for KalshiClient {
     async fn get_positions(&self) -> Result<Value, ApiError> {
         KalshiClient::get_positions(self).await
     }
-    async fn get_fills(&self, min_ts: i64, limit: u32, cursor: Option<&str>) -> Result<Value, ApiError> {
-        KalshiClient::get_fills(self, min_ts, limit, cursor).await
+    async fn get_fills(
+        &self,
+        min_ts: i64,
+        limit: u32,
+        cursor: Option<&str>,
+        ticker: Option<&str>,
+    ) -> Result<Value, ApiError> {
+        KalshiClient::get_fills(self, min_ts, limit, cursor, ticker).await
     }
     async fn get_orders(&self, status: Option<&str>, limit: u32) -> Result<Value, ApiError> {
         KalshiClient::get_orders(self, status, limit).await

@@ -111,6 +111,53 @@ pub fn normalize_fill(fill: &Value) -> Option<NormalizedFill> {
     })
 }
 
+/// Entry-price transition rule for one fill, factored out of `apply_fill` so
+/// it can also be replayed over fill history (see `replay_entry_price`)
+/// without touching PnL, fees, or win/loss counters:
+/// ```text
+/// flat/flip -> entry = fill price
+/// extended  -> size-weighted average of old entry and fill price
+/// reduced   -> entry unchanged;  flattened -> entry cleared
+/// ```
+fn fold_entry_price(
+    old_inv: i64,
+    new_inv: i64,
+    entry_before: Option<f64>,
+    size: i64,
+    price: f64,
+) -> Option<f64> {
+    if new_inv == 0 {
+        None
+    } else if old_inv == 0 || (old_inv > 0) != (new_inv > 0) {
+        Some(price)
+    } else if new_inv.abs() > old_inv.abs() {
+        let entry_before = entry_before.unwrap_or(price);
+        Some((old_inv.abs() as f64 * entry_before + size as f64 * price) / new_inv.abs() as f64)
+    } else {
+        entry_before
+    }
+}
+
+/// Reconstruct (position, entry_price) for one ticker by replaying its full
+/// fill history from flat, ignoring PnL/fees/win-loss (those were already
+/// booked live when each fill first happened — or, for fills from before
+/// this process existed, were never ours to book). This exists because
+/// `entry_price` is in-memory only: a restart re-syncs `position` from the
+/// exchange (authoritative) but has no cost basis for it, so the next fill
+/// after a restart was silently treated as the position's entire history —
+/// wildly overstating realized losses on the first close after a redeploy.
+/// `fills` must be chronologically ascending (oldest first).
+pub fn replay_entry_price(fills: &[NormalizedFill]) -> (i64, Option<f64>) {
+    let mut position = 0i64;
+    let mut entry_price = None;
+    for nf in fills {
+        let old_inv = position;
+        position += if nf.long_yes { nf.size } else { -nf.size };
+        entry_price = fold_entry_price(old_inv, position, entry_price, nf.size, nf.price_yes);
+    }
+    (position, entry_price)
+}
+
 /// Everything the bot tracks about one market.
 #[derive(Debug, Default)]
 pub struct TickerState {
@@ -260,12 +307,7 @@ impl TraderState {
 
     /// Book one exchange fill: fee, position, entry price, realized PnL.
     /// Returns the realized PnL (gross of fees — the fee is booked here too,
-    /// separately). Entry-price transitions:
-    /// ```text
-    /// flat/flip -> entry = fill price
-    /// extended  -> size-weighted average of old entry and fill price
-    /// reduced   -> entry unchanged;  flattened -> entry cleared
-    /// ```
+    /// separately). Entry-price transitions follow `fold_entry_price`.
     /// Realized PnL always uses the PRE-fill entry price.
     pub fn apply_fill(&mut self, ticker: &str, nf: &NormalizedFill, fee: f64, now_epoch_s: f64) -> f64 {
         // Fee at the actual rate the exchange charged (maker or 4x taker)
@@ -294,18 +336,7 @@ impl TraderState {
         }
         let new_inv = ts.position;
 
-        if new_inv == 0 {
-            ts.entry_price = None;
-        } else if old_inv == 0 || (old_inv > 0) != (new_inv > 0) {
-            ts.entry_price = Some(nf.price_yes); // opened or flipped
-        } else if new_inv.abs() > old_inv.abs() {
-            // Extended the same direction — size-weighted average entry
-            ts.entry_price = Some(
-                (old_inv.abs() as f64 * entry_before + nf.size as f64 * nf.price_yes)
-                    / new_inv.abs() as f64,
-            );
-        }
-        // else: reduced toward zero — entry unchanged
+        ts.entry_price = fold_entry_price(old_inv, new_inv, ts.entry_price, nf.size, nf.price_yes);
 
         // A consumed resting order must release its slot so the next quote
         // cycle replaces that side instead of skipping it
@@ -518,6 +549,35 @@ mod tests {
         let ts = &s.tickers["KXADP-26JUL-T0"];
         assert_eq!(ts.position, -1);
         assert_eq!(ts.entry_price, Some(0.44));
+    }
+
+    #[test]
+    fn replay_reconstructs_weighted_average_entry_lost_by_restart() {
+        // Regression for the entry-price-reset bug: a restart wipes
+        // entry_price in memory but not position (position is re-synced from
+        // the exchange), so the next live fill was silently treated as the
+        // position's entire cost basis — wildly overstating realized PnL on
+        // the first close after a redeploy. replay_entry_price must
+        // reproduce exactly what a never-restarted bot would have.
+        // Mirrors a real prod short: 4 (sell,no) extends to -4, weighted avg
+        // entry 0.67 (verified against Kalshi's own realized_pnl on close).
+        let live_fills = [
+            fill_json("sell", "no", 0.30, 1.0, false, "a"), // yes-equiv 0.70
+            fill_json("sell", "no", 0.32, 1.0, false, "b"), // yes-equiv 0.68
+            fill_json("sell", "no", 0.32, 1.0, false, "c"), // yes-equiv 0.68
+            fill_json("sell", "no", 0.38, 1.0, false, "d"), // yes-equiv 0.62
+        ];
+        let mut live = TraderState::new(0.0);
+        for f in &live_fills {
+            apply(&mut live, f);
+        }
+        let live_entry = live.tickers["KXADP-26JUL-T0"].entry_price.unwrap();
+        assert!((live_entry - 0.67).abs() < 1e-9);
+
+        let normalized: Vec<_> = live_fills.iter().map(|f| normalize_fill(f).unwrap()).collect();
+        let (position, replayed_entry) = replay_entry_price(&normalized);
+        assert_eq!(position, -4);
+        assert!((replayed_entry.unwrap() - live_entry).abs() < 1e-9);
     }
 
     #[test]

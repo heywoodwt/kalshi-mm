@@ -34,7 +34,7 @@ use kalshi_mm::ladder::Ladders;
 use kalshi_mm::model::Policy;
 use kalshi_mm::paper::PaperClient;
 use kalshi_mm::spot::{trend_gated, SpotFeed, SpotState, COINBASE_WS_URL};
-use kalshi_mm::state::{normalize_fill, TraderState};
+use kalshi_mm::state::{normalize_fill, replay_entry_price, TraderState};
 use kalshi_mm::transport::{WsClient, WsEvent, PROD_WS_URL};
 use kalshi_mm::{book, executor, state};
 
@@ -490,7 +490,7 @@ impl<M: MarketApi> Trader<M> {
                     let mut cursor: Option<String> = None;
                     let mut ok = true;
                     for _ in 0..25 {
-                        match self.api.get_fills(fills_last_ts - 60, 200, cursor.as_deref()).await {
+                        match self.api.get_fills(fills_last_ts - 60, 200, cursor.as_deref(), None).await {
                             Ok(resp) => {
                                 for fill in resp.get("fills").and_then(Value::as_array).into_iter().flatten() {
                                     self.process_fill(fill);
@@ -837,6 +837,75 @@ impl<M: MarketApi> Trader<M> {
         }
         info!("Synced {} positions from Kalshi{}", exchange.len(),
               if drift > 0 { format!(" ({drift} drifts corrected)") } else { String::new() });
+
+        // entry_price is in-memory only — a restart re-syncs `position` from
+        // the exchange above but has no cost basis for it, so the next fill
+        // would otherwise be treated as the position's entire history
+        // (wildly overstating realized PnL on the first close post-redeploy).
+        // Only backfill markets this bot actually manages: the account also
+        // holds ~200 legacy positions from other categories that this bot
+        // reconciles but never quotes or closes, and querying fills for all
+        // of them on every restart risks rate-limiting (429s already seen).
+        let needs_backfill: Vec<String> = self
+            .state
+            .tickers
+            .iter()
+            .filter(|(t, ts)| {
+                ts.position != 0 && ts.entry_price.is_none() && self.active_tickers.contains_key(*t)
+            })
+            .map(|(t, _)| t.clone())
+            .collect();
+        for ticker in needs_backfill {
+            self.backfill_entry_price(&ticker).await;
+        }
+    }
+
+    /// Reconstruct a lost cost basis for `ticker` by replaying its full fill
+    /// history from flat. Only called right after `sync_positions` finds a
+    /// nonzero position with no local entry price (see there for why that
+    /// happens). Leaves `entry_price` untouched (still None) on any error or
+    /// on a sanity-check mismatch — an unknown entry falls back safely
+    /// elsewhere (position_value, PNL logs) rather than booking a wrong one.
+    async fn backfill_entry_price(&mut self, ticker: &str) {
+        let mut raw_fills: Vec<Value> = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..10 {
+            let resp = match self.api.get_fills(0, 200, cursor.as_deref(), Some(ticker)).await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    error!("Error backfilling entry price for {ticker}: {e}");
+                    return;
+                }
+            };
+            raw_fills.extend(
+                resp.get("fills").and_then(Value::as_array).cloned().unwrap_or_default(),
+            );
+            cursor = resp.get("cursor").and_then(Value::as_str)
+                .filter(|c| !c.is_empty()).map(str::to_string);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        // The API returns fills newest-first; the replay needs oldest-first.
+        raw_fills.sort_by(|a, b| {
+            json_f64(a.get("ts")).partial_cmp(&json_f64(b.get("ts"))).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let fills: Vec<_> = raw_fills.iter().filter_map(normalize_fill).collect();
+        let (replayed_position, entry_price) = replay_entry_price(&fills);
+        let Some(entry_price) = entry_price else {
+            warn!("Entry-price backfill for {ticker}: replay landed flat, nothing to set");
+            return;
+        };
+        let live_position = self.state.tickers.get(ticker).map(|ts| ts.position).unwrap_or(0);
+        if replayed_position != live_position {
+            warn!("Entry-price backfill for {ticker}: replayed position {replayed_position} \
+                   != live {live_position} (fill history likely truncated), leaving entry unset");
+            return;
+        }
+        info!("Reconstructed entry price for {ticker}: {entry_price:.3} (from {} fills)", fills.len());
+        if let Some(ts) = self.state.tickers.get_mut(ticker) {
+            ts.entry_price = Some(entry_price);
+        }
     }
 
     /// Stop-loss + expiry exits (crossing IOC), every 10 seconds.

@@ -103,7 +103,13 @@ impl MarketApi for PaperClient {
         Ok(json!({"positions": []})) // paper fills never happen -> no positions
     }
 
-    async fn get_fills(&self, _min_ts: i64, _limit: u32, _cursor: Option<&str>) -> Result<Value, ApiError> {
+    async fn get_fills(
+        &self,
+        _min_ts: i64,
+        _limit: u32,
+        _cursor: Option<&str>,
+        _ticker: Option<&str>,
+    ) -> Result<Value, ApiError> {
         Ok(json!({"fills": []})) // resting paper orders are never matched
     }
 
@@ -159,7 +165,7 @@ mod tests {
     async fn offline_reads_are_safe_defaults() {
         let paper = PaperClient::new(None);
         assert_eq!(paper.get_positions().await.unwrap()["positions"], json!([]));
-        assert_eq!(paper.get_fills(0, 10, None).await.unwrap()["fills"], json!([]));
+        assert_eq!(paper.get_fills(0, 10, None, None).await.unwrap()["fills"], json!([]));
         let book = paper.get_orderbook("X", 10).await.unwrap();
         assert!(book["orderbook"]["yes"].is_array());
         assert_eq!(paper.cancel_all_orders().await.unwrap(), 0);
