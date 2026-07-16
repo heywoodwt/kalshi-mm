@@ -938,12 +938,12 @@
    }
   },
   {
-   "name": "no_side_short_cover",
+   "name": "short_via_sellno_cover_via_buyyes",
    "fills": [
     {
      "trade_id": "n1",
      "market_ticker": "KXADP-X",
-     "action": "buy",
+     "action": "sell",
      "side": "no",
      "no_price_dollars": 0.55,
      "count": 2,
@@ -952,9 +952,9 @@
     {
      "trade_id": "n2",
      "market_ticker": "KXADP-X",
-     "action": "sell",
-     "side": "no",
-     "no_price_dollars": 0.6,
+     "action": "buy",
+     "side": "yes",
+     "yes_price_dollars": 0.4,
      "count": 1,
      "is_taker": false
     }
@@ -970,7 +970,8 @@
     "maker_fills": 2,
     "realized_by_ticker": 0.04999999999999993,
     "fills": 2
-   }
+   },
+   "note": "Real Kalshi fill shapes: open short via (sell,no), cover via (buy,yes). Verified against exchange position_fp. NOTE: the Python bot shares the old (action==buy)==(side==yes) fill-sign bug, so this fixture intentionally encodes exchange-correct behavior, not Python-matching behavior."
   },
   {
    "name": "extend_reduce_flip",

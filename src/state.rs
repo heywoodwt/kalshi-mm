@@ -57,10 +57,19 @@ fn str_field<'a>(fill: &'a Value, keys: &[&str]) -> Option<&'a str> {
 
 /// Fold a raw /portfolio/fills entry into YES-equivalent terms.
 ///
+/// Kalshi reports fills in the YES frame: `action` ALONE gives the
+/// yes-equivalent direction (buy = acquire/long, sell = shed/short), and
+/// `side` (yes/no) only selects which price field to read:
 /// ```text
-/// buy yes / sell no -> long YES,  price = yes_price
-/// sell yes / buy no -> short YES, price = 1 - no_price
+/// action=buy  -> long YES  (+size)
+/// action=sell -> short YES (-size)
+/// price_yes = side=="yes" ? yes_price : 1 - no_price
 /// ```
+/// This was verified against the exchange: summing an account's real fills
+/// as buy=+ / sell=- reproduces `position_fp` exactly, whereas the earlier
+/// `(action=="buy")==(side=="yes")` XNOR mis-signed every (sell, no) fill —
+/// the bulk of real sells — booking a position-reducing sell as a
+/// long-adding buy (the Python bot shares this latent bug).
 ///
 /// Returns None for malformed fills and for sub-1-contract fractional fills
 /// (count_fp can be 0.5; flooring those to 0 while still booking fees and
@@ -94,7 +103,7 @@ pub fn normalize_fill(fill: &Value) -> Option<NormalizedFill> {
     Some(NormalizedFill {
         fill_id,
         ticker: ticker.to_string(),
-        long_yes: (action == "buy") == (side == "yes"),
+        long_yes: action == "buy",
         price_yes,
         size,
         is_taker: fill.get("is_taker").and_then(Value::as_bool).unwrap_or(false),
@@ -385,14 +394,38 @@ mod tests {
     }
 
     #[test]
-    fn normalize_yes_buy_and_no_buy() {
+    fn normalize_signs_by_action_reads_price_by_side() {
+        // Direction is `action` alone (YES frame). `side` only picks the price.
+        // buy yes @ 0.40 -> long, price 0.40
         let nf = normalize_fill(&fill_json("buy", "yes", 0.40, 1.0, false, "a")).unwrap();
         assert!(nf.long_yes);
         assert_eq!(nf.price_yes, 0.40);
-        // Buying NO @ 0.55 = shorting YES @ 0.45
-        let nf = normalize_fill(&fill_json("buy", "no", 0.55, 1.0, false, "b")).unwrap();
+        // sell no @ no 0.55 -> SHORT (the case the old XNOR mis-signed as long),
+        // yes-equivalent price 0.45
+        let nf = normalize_fill(&fill_json("sell", "no", 0.55, 1.0, false, "b")).unwrap();
         assert!(!nf.long_yes);
         assert!((nf.price_yes - 0.45).abs() < 1e-12);
+        // sell yes @ 0.40 -> SHORT, price 0.40
+        let nf = normalize_fill(&fill_json("sell", "yes", 0.40, 1.0, false, "c")).unwrap();
+        assert!(!nf.long_yes);
+        assert_eq!(nf.price_yes, 0.40);
+    }
+
+    #[test]
+    fn position_matches_exchange_from_real_fills() {
+        // Regression for the fill-sign bug: replaying the exact real fill
+        // sequence that diverged in prod (buy 1, buy 1, sell 2, sell 4) must
+        // land on the exchange-reported position of -4, not the old XNOR's +8.
+        let mut s = TraderState::new(0.0);
+        for (act, sd, px, n, id) in [
+            ("buy", "yes", 0.70, 1.0, "r1"),
+            ("buy", "yes", 0.71, 1.0, "r2"),
+            ("sell", "no", 0.40, 2.0, "r3"), // sell 2 (yes-equiv 0.60)
+            ("sell", "no", 0.45, 4.0, "r4"), // sell 4 (yes-equiv 0.55)
+        ] {
+            apply(&mut s, &fill_json(act, sd, px, n, false, id));
+        }
+        assert_eq!(s.tickers["KXADP-26JUL-T0"].position, -4);
     }
 
     #[test]
