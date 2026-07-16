@@ -95,6 +95,16 @@ impl SpotState {
 
 pub const COINBASE_WS_URL: &str = "wss://ws-feed.exchange.coinbase.com";
 
+/// Trend-gate Schmitt trigger. Trip ON once |60s return| exceeds `trip`;
+/// release only once it falls back below `trip * release_ratio`. The band
+/// stops a return hovering at the threshold from flapping the gate — each
+/// flap cancels and re-places every resting quote, forfeiting FIFO queue
+/// priority exactly when quotes are most valuable. `release_ratio` in (0, 1].
+pub fn trend_gated(ret_abs: f64, currently_gated: bool, trip: f64, release_ratio: f64) -> bool {
+    let threshold = if currently_gated { trip * release_ratio } else { trip };
+    ret_abs > threshold
+}
+
 /// Price from a Coinbase `ticker` channel message, or None for anything else.
 pub fn parse_ticker_price(msg: &Value) -> Option<f64> {
     if msg.get("type").and_then(Value::as_str) != Some("ticker") {
@@ -197,6 +207,31 @@ impl SpotFeed {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trend_gate_trips_and_releases_on_a_band() {
+        let (trip, ratio) = (0.0015, 0.7); // release at 0.00105
+        // Not gated: trips only above the trip threshold
+        assert!(!trend_gated(0.0010, false, trip, ratio));
+        assert!(!trend_gated(0.0015, false, trip, ratio)); // strict >
+        assert!(trend_gated(0.0016, false, trip, ratio));
+        // Gated: holds through the hysteresis band, releases below it
+        assert!(trend_gated(0.0012, true, trip, ratio)); // in band -> stay ON
+        assert!(!trend_gated(0.0010, true, trip, ratio)); // below band -> OFF
+    }
+
+    #[test]
+    fn trend_gate_does_not_flap_at_the_threshold() {
+        // The exact prod failure: 60s return oscillating around 0.0015 must
+        // NOT flip the gate once tripped (it stays ON until it clears the band).
+        let (trip, ratio) = (0.0015, 0.7);
+        let mut gated = trend_gated(0.00156, false, trip, ratio); // trips ON
+        assert!(gated);
+        for &r in &[0.00145, 0.00156, 0.00150, 0.00148, 0.00152] {
+            gated = trend_gated(r, gated, trip, ratio);
+            assert!(gated, "gate flapped at ret {r} inside the hysteresis band");
+        }
+    }
 
     #[test]
     fn ema_converges_and_lags_linear_drift() {

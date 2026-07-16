@@ -67,6 +67,10 @@ pub struct SpotParams {
     pub stale_max_s: f64,
     /// |60s spot return| above this => trend gate (cancel + pause quoting).
     pub gate_ret_60s: f64,
+    /// Trend-gate hysteresis: once tripped, the gate releases only when the
+    /// return falls below gate_ret_60s * this ratio. In (0, 1]; < 1 prevents
+    /// a return hovering at the threshold from flapping the gate.
+    pub gate_release_ratio: f64,
     /// EMA horizon (seconds) measuring "unabsorbed" spot movement.
     pub fv_ema_tau_s: f64,
     /// Clamp on the quote re-centering shift (dollars).
@@ -82,6 +86,7 @@ impl Default for SpotParams {
         Self {
             stale_max_s: 10.0,
             gate_ret_60s: 0.0015,
+            gate_release_ratio: 0.7,
             fv_ema_tau_s: 60.0,
             fv_shift_max: 0.10,
             unwind_shift: 0.04,
@@ -180,14 +185,19 @@ impl Config {
             bail!("no [[categories]]");
         }
         // gate_ret_60s <= 0 gates on every tick (permanent dark);
-        // stale_max_s <= 0 marks the feed stale the instant it ticks.
+        // stale_max_s <= 0 marks the feed stale the instant it ticks;
+        // gate_release_ratio outside (0, 1] breaks the hysteresis band
+        // (>1 releases above the trip level, so the gate can never latch).
         if self.categories.iter().any(|c| c.spot_feed.is_some())
-            && (self.spot.gate_ret_60s <= 0.0 || self.spot.stale_max_s <= 0.0)
+            && (self.spot.gate_ret_60s <= 0.0
+                || self.spot.stale_max_s <= 0.0
+                || !(0.0 < self.spot.gate_release_ratio && self.spot.gate_release_ratio <= 1.0))
         {
             bail!(
-                "spot gate params must be positive (gate_ret_60s={}, stale_max_s={})",
+                "spot gate params invalid (gate_ret_60s={}, stale_max_s={}, gate_release_ratio={})",
                 self.spot.gate_ret_60s,
-                self.spot.stale_max_s
+                self.spot.stale_max_s,
+                self.spot.gate_release_ratio
             );
         }
         Ok(())
@@ -241,6 +251,11 @@ mod tests {
         // Same zero param is FINE when no category binds a spot feed
         let unbound = broken.replace("spot_feed = \"BTC-USD\"", "");
         assert!(parse(&unbound).is_ok());
+        // Hysteresis ratio outside (0, 1] is rejected when bound
+        let bad_ratio = broken.replace("gate_ret_60s = 0.0", "gate_release_ratio = 1.5");
+        assert!(parse(&bad_ratio).is_err());
+        let zero_ratio = broken.replace("gate_ret_60s = 0.0", "gate_release_ratio = 0.0");
+        assert!(parse(&zero_ratio).is_err());
     }
 
     const LOWVOL: &str = include_str!("../config/lowvol.toml");
@@ -321,6 +336,7 @@ mod tests {
         // Defaults from the spec
         assert_eq!(cfg.spot.stale_max_s, 10.0);
         assert_eq!(cfg.spot.gate_ret_60s, 0.0015);
+        assert_eq!(cfg.spot.gate_release_ratio, 0.7);
         assert_eq!(cfg.spot.fv_ema_tau_s, 60.0);
         assert_eq!(cfg.spot.fv_shift_max, 0.10);
         assert_eq!(cfg.spot.unwind_shift, 0.04);

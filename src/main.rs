@@ -33,7 +33,7 @@ use kalshi_mm::features::build_observation;
 use kalshi_mm::ladder::Ladders;
 use kalshi_mm::model::Policy;
 use kalshi_mm::paper::PaperClient;
-use kalshi_mm::spot::{SpotFeed, SpotState, COINBASE_WS_URL};
+use kalshi_mm::spot::{trend_gated, SpotFeed, SpotState, COINBASE_WS_URL};
 use kalshi_mm::state::{normalize_fill, TraderState};
 use kalshi_mm::transport::{WsClient, WsEvent, PROD_WS_URL};
 use kalshi_mm::{book, executor, state};
@@ -536,7 +536,15 @@ impl<M: MarketApi> Trader<M> {
             return true;
         }
         match self.spot.ret(60.0, now_mono) {
-            Some(r) => r.abs() > self.cfg.spot.gate_ret_60s,
+            // Hysteresis band keyed on the latched gate state so a return
+            // hovering at the threshold doesn't flap the gate (each flap
+            // cancels + re-places every resting quote, losing FIFO priority)
+            Some(r) => trend_gated(
+                r.abs(),
+                self.spot_gate_on,
+                self.cfg.spot.gate_ret_60s,
+                self.cfg.spot.gate_release_ratio,
+            ),
             None => true, // <60s of history — conservative until warm
         }
     }
