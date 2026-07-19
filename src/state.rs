@@ -217,6 +217,9 @@ pub struct TickerState {
     pub ever_quoted: bool,
     /// Market close, epoch seconds (parsed once at startup).
     pub close_time_s: Option<f64>,
+    /// Epoch s of the last fill booked here; sync_positions skips drift
+    /// correction briefly after a fill (snapshot/fills-poll race).
+    pub last_fill_epoch: f64,
     /// Price granularity in dollars (0.001 = subpenny market).
     pub tick: f64,
 }
@@ -352,6 +355,7 @@ impl TraderState {
             .get_mut(ticker)
             .expect("apply_fill requires an existing TickerState");
 
+        ts.last_fill_epoch = now_epoch_s;
         let old_inv = ts.position;
         let entry_before = ts.entry_price.unwrap_or(nf.price_yes);
         if nf.long_yes {
@@ -558,6 +562,18 @@ mod tests {
         assert!((s.daily_pnl - 0.03).abs() < 1e-12);
         assert_eq!(s.wins, 1);
         assert!((ts.realized_pnl - 0.05).abs() < 1e-12);
+    }
+
+    #[test]
+    fn apply_fill_stamps_last_fill_epoch() {
+        // sync_positions uses this stamp to skip drift-correcting a ticker
+        // whose fill JUST booked (the 2026-07-19 16:42 race: correction and
+        // fill double-applied, walking the position 1->2->3->2)
+        let mut s = TraderState::new(0.0);
+        let nf = normalize_fill(&fill_json("buy", "yes", 0.40, 1.0, false, "t")).unwrap();
+        s.ticker("KXADP-26JUL-T0", "KXADP");
+        s.apply_fill("KXADP-26JUL-T0", &nf, 0.01, 1234.5);
+        assert_eq!(s.tickers["KXADP-26JUL-T0"].last_fill_epoch, 1234.5);
     }
 
     #[test]

@@ -837,6 +837,7 @@ impl<M: MarketApi> Trader<M> {
             .collect();
         let mut drift = 0;
         let mut vanished: Vec<String> = Vec::new();
+        let now_epoch = epoch_now();
         let all: HashSet<String> = exchange.keys().cloned().chain(local_nonzero).collect();
         for ticker in all {
             let remote = exchange.get(&ticker).copied().unwrap_or(0);
@@ -851,6 +852,13 @@ impl<M: MarketApi> Trader<M> {
                 // through the settlement lookup instead of correcting now.
                 if remote == 0 && self.active_tickers.contains_key(&ticker) {
                     vanished.push(ticker);
+                    continue;
+                }
+                // A fill booked seconds ago means this positions snapshot and
+                // the fills poll are mid-race (observed walking a position
+                // 1->2->3->2 live); give it one cycle to converge — real
+                // drift is still corrected on the next sync.
+                if now_epoch - ts.last_fill_epoch < 10.0 {
                     continue;
                 }
                 warn!("POSITION DRIFT: {ticker} local={} exchange={remote}, correcting", ts.position);
