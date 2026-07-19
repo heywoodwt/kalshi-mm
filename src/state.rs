@@ -313,7 +313,12 @@ impl TraderState {
         self.wins as f64 / total as f64
     }
 
-    /// Capital locked in open positions (contracts * entry price).
+    /// Collateral locked in open positions, per Kalshi's margining: a long
+    /// YES locks its entry cost, a short YES locks the NO-side cost
+    /// (1 - entry) per contract. The old |position| x entry rule counted a
+    /// 5c wing short as $0.05 when it actually locks ~$0.95 — the risk
+    /// budget under-counted shorts ~19x, so the bot "had headroom" right up
+    /// until insufficient_balance backoffs started firing.
     ///
     /// With `active`, counts only markets this bot quotes — legacy positions
     /// from prior deployments must not consume the risk budget (the limit
@@ -330,7 +335,8 @@ impl TraderState {
                 }
             }
             let entry = ts.entry_price.unwrap_or(0.50); // unknown entry -> 0.50
-            total += ts.position.unsigned_abs() as f64 * entry;
+            let per_contract = if ts.position > 0 { entry } else { 1.0 - entry };
+            total += ts.position.unsigned_abs() as f64 * per_contract;
         }
         total
     }
@@ -807,6 +813,24 @@ mod tests {
         assert_eq!(s.apply_settlement("KXADP-26JUL-T2", None), None);
         assert_eq!(s.tickers["KXADP-26JUL-T2"].position, 0);
         assert!((s.daily_pnl - daily_before).abs() < 1e-12);
+    }
+
+    #[test]
+    fn position_value_measures_short_collateral() {
+        // Kalshi locks the NO-side cost for YES-shorts: a 4-lot short entered
+        // at 0.05 locks 4 x 0.95 = $3.80, not the 4 x 0.05 = $0.20 the old
+        // |pos| x entry rule counted — the risk budget under-counted wing
+        // shorts ~19x, which is exactly when balance backoffs start firing.
+        let mut s = TraderState::new(0.0);
+        let short = s.ticker("W", "CAT");
+        short.position = -4;
+        short.entry_price = Some(0.05);
+        assert!((s.position_value(None) - 3.80).abs() < 1e-12);
+        // Longs unchanged: they lock their entry cost
+        let long = s.ticker("L", "CAT");
+        long.position = 2;
+        long.entry_price = Some(0.40);
+        assert!((s.position_value(None) - 4.60).abs() < 1e-12);
     }
 
     #[test]
