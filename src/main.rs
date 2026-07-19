@@ -891,6 +891,13 @@ impl<M: MarketApi> Trader<M> {
                     continue;
                 }
                 warn!("POSITION DRIFT: {ticker} local={} exchange={remote}, correcting", ts.position);
+                // A flat, never-filled local ticker picking up an exchange
+                // position = inventory carried across a restart, not this
+                // process's trading — its closes are exempt from the
+                // kill-switch streak (see TickerState::carried)
+                if ts.position == 0 && ts.last_fill_epoch == 0.0 && remote != 0 {
+                    ts.carried = true;
+                }
                 ts.position = remote;
                 drift += 1;
             }

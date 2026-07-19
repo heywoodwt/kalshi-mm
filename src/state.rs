@@ -220,6 +220,13 @@ pub struct TickerState {
     /// Epoch s of the last fill booked here; sync_positions skips drift
     /// correction briefly after a fill (snapshot/fills-poll race).
     pub last_fill_epoch: f64,
+    /// Position was established by position SYNC (inventory carried across
+    /// a restart), not by this process's own fills. Closes of carried
+    /// inventory book real PnL but are exempt from the consecutive-loss
+    /// streak — old-era losses must not trip the kill switch on the live
+    /// strategy (a boot-time stop-loss batch did exactly that). Cleared
+    /// when the position flattens or flips.
+    pub carried: bool,
     /// Price granularity in dollars (0.001 = subpenny market).
     pub tick: f64,
 }
@@ -373,6 +380,14 @@ impl TraderState {
         }
         let new_inv = ts.position;
 
+        // Whether THIS close is of carried inventory must be read before the
+        // flag is retired: flattening (or flipping through zero) ends the
+        // carried era — whatever opens next is this process's own trading
+        let closing_carried = ts.carried;
+        if new_inv == 0 || (old_inv != 0 && (old_inv > 0) != (new_inv > 0)) {
+            ts.carried = false;
+        }
+
         ts.entry_price = fold_entry_price(old_inv, new_inv, ts.entry_price, nf.size, nf.price_yes);
 
         // A consumed resting order must release its slot so the next quote
@@ -398,7 +413,7 @@ impl TraderState {
         if realized != 0.0 {
             ts.realized_pnl += realized;
             let category = ts.category.clone();
-            self.book_realized_close(category, realized);
+            self.book_realized_close(category, realized, closing_carried);
         }
 
         self.fills += 1;
@@ -438,8 +453,10 @@ impl TraderState {
         }
         let position = ts.position;
         let entry = ts.entry_price;
+        let closing_carried = ts.carried;
         ts.position = 0;
         ts.entry_price = None;
+        ts.carried = false;
         let (Some(entry), Some(result_yes)) = (entry, result_yes) else {
             return None;
         };
@@ -447,7 +464,7 @@ impl TraderState {
         let realized = position as f64 * (settle_value - entry);
         let category = ts.category.clone();
         ts.realized_pnl += realized;
-        self.book_realized_close(category, realized);
+        self.book_realized_close(category, realized, closing_carried);
         Some(realized)
     }
 
@@ -455,8 +472,11 @@ impl TraderState {
     /// account counters: daily/cumulative PnL, win/loss tally, and the
     /// per-category consecutive-loss streak the kill switch reads. Shared so
     /// the two close paths can't drift apart. No-op at exactly zero (a
-    /// scratch close is neither a win nor a loss).
-    fn book_realized_close(&mut self, category: String, realized: f64) {
+    /// scratch close is neither a win nor a loss). `carried` closes (see
+    /// TickerState::carried) book PnL and tallies but leave the streak
+    /// untouched in BOTH directions — old-era outcomes neither halt nor
+    /// absolve the live strategy.
+    fn book_realized_close(&mut self, category: String, realized: f64, carried: bool) {
         if realized == 0.0 {
             return;
         }
@@ -464,10 +484,14 @@ impl TraderState {
         self.cumulative_pnl += realized;
         if realized > 0.0 {
             self.wins += 1;
-            self.consecutive_losses.insert(category, 0);
+            if !carried {
+                self.consecutive_losses.insert(category, 0);
+            }
         } else {
             self.losses += 1;
-            *self.consecutive_losses.entry(category).or_insert(0) += 1;
+            if !carried {
+                *self.consecutive_losses.entry(category).or_insert(0) += 1;
+            }
         }
     }
 
@@ -783,6 +807,48 @@ mod tests {
         // Settlement losses must feed the same per-category streak the
         // fill-based kill switch reads, or expiring losers evade it
         assert_eq!(s.consecutive_losses.get("KXADP").copied(), Some(1));
+    }
+
+    #[test]
+    fn carried_position_close_books_pnl_but_not_streak() {
+        // Regression for the 2026-07-19 boot: stop-losses on positions
+        // CARRIED across a restart (synced from the exchange, never traded
+        // by this process) fired as a batch and tripped the 3-consecutive-
+        // loss halt — old-era losses halting the current strategy. Carried
+        // closes must book real PnL and the win/loss tally, but not the
+        // streak the kill switch reads.
+        let mut s = TraderState::new(0.0);
+        let ts = s.ticker("KXADP-26JUL-T0", "KXADP");
+        ts.position = -1; // established by sync, not by a fill
+        ts.entry_price = Some(0.70);
+        ts.carried = true;
+        // Boot stop-loss: buy 1 @ 0.79 covers the carried short at a loss
+        let realized = apply(&mut s, &fill_json("buy", "yes", 0.79, 1.0, true, "x1"));
+        assert!((realized - (-0.09)).abs() < 1e-9);
+        assert_eq!(s.losses, 1); // honest stats still count it
+        assert_eq!(s.consecutive_losses.get("KXADP").copied().unwrap_or(0), 0); // streak exempt
+        // Flattening cleared the carried flag: the NEXT position is this
+        // process's own trading and its losses count toward the streak again
+        assert!(!s.tickers["KXADP-26JUL-T0"].carried);
+        apply(&mut s, &fill_json("buy", "yes", 0.50, 1.0, false, "x2"));
+        apply(&mut s, &fill_json("sell", "yes", 0.45, 1.0, false, "x3"));
+        assert_eq!(s.consecutive_losses.get("KXADP").copied(), Some(1));
+    }
+
+    #[test]
+    fn carried_settlement_skips_streak_too() {
+        // Same exemption on the settlement path: a carried loser expiring
+        // against us is old-era PnL, not a strike against the live strategy
+        let mut s = TraderState::new(0.0);
+        let ts = s.ticker("KXADP-26JUL-T0", "KXADP");
+        ts.position = -2;
+        ts.entry_price = Some(0.30);
+        ts.carried = true;
+        let realized = s.apply_settlement("KXADP-26JUL-T0", Some(true));
+        assert!((realized.unwrap() - (-1.40)).abs() < 1e-9);
+        assert_eq!(s.losses, 1);
+        assert_eq!(s.consecutive_losses.get("KXADP").copied().unwrap_or(0), 0);
+        assert!(!s.tickers["KXADP-26JUL-T0"].carried);
     }
 
     #[test]
