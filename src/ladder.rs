@@ -19,6 +19,30 @@ pub fn parse_strike(ticker: &str) -> Option<(String, f64)> {
     Some((expiry.to_string(), strike))
 }
 
+/// Worst-case scenario PnL for one ladder's open positions, model-free:
+/// if spot settles ABOVE every strike each YES pays $1 (shorts pay full
+/// freight), BELOW every strike each YES pays $0 (longs lose their marks).
+/// This bounds gap risk that per-strike deltas miss — a 5c wing short has
+/// near-zero delta but a 95c gap loss, and adjacent wing shorts all lose
+/// TOGETHER in one move. `entries` = (signed position, YES-frame mark).
+/// Returns (up_tail_loss, down_tail_loss), both >= 0 dollars.
+pub fn tail_losses(entries: impl IntoIterator<Item = (i64, f64)>) -> (f64, f64) {
+    let (mut up_pnl, mut down_pnl) = (0.0, 0.0);
+    for (pos, mark) in entries {
+        up_pnl += pos as f64 * (1.0 - mark);
+        down_pnl -= pos as f64 * mark;
+    }
+    ((-up_pnl).max(0.0), (-down_pnl).max(0.0))
+}
+
+/// "KXBTCD-26JUL2417-T60499.99" -> "KXBTCD-26JUL2417" for threshold legs,
+/// None otherwise. Unlike `parse_strike`'s expiry-only group key this keeps
+/// the series, so same-expiry ladders from different series never pool.
+pub fn ladder_prefix(ticker: &str) -> Option<&str> {
+    parse_strike(ticker)?;
+    ticker.rsplit_once('-').map(|(prefix, _)| prefix)
+}
+
 /// Per-expiry strike ladders for one category universe. Rebuilt at startup
 /// from the discovered tickers (market set is fixed for a session).
 #[derive(Debug, Default)]
@@ -123,6 +147,36 @@ mod tests {
         // delta_max clamp
         let d = l.delta_for("KXBTCD-26JUL1517-T64250", 0.001, mid_of).unwrap();
         assert!((d - 0.001).abs() < 1e-12);
+    }
+
+    #[test]
+    fn tail_losses_measure_worst_case_scenarios() {
+        // Wing-short book (the real JUL24 shape): shorts lose if spot settles
+        // above every strike (up-tail), longs lose if below every strike.
+        // Short 4 @ mark 0.05 and short 2 @ 0.10: up-tail = 4*0.95 + 2*0.90
+        let (up, down) = tail_losses([(-4, 0.05), (-2, 0.10)]);
+        assert!((up - 5.6).abs() < 1e-9);
+        assert!((down - 0.0).abs() < 1e-9); // shorts GAIN on a down move
+        // Long 2 @ 0.93: down-tail = 2*0.93, up-tail 0
+        let (up, down) = tail_losses([(2, 0.93)]);
+        assert!((up - 0.0).abs() < 1e-9);
+        assert!((down - 1.86).abs() < 1e-9);
+        // Longs offset shorts: short 1 @ 0.50 + long 1 @ 0.40 -> up move nets
+        // -0.50 + 0.60 = +0.10 (no loss); down move nets +0.50 - 0.40 = +0.10
+        let (up, down) = tail_losses([(-1, 0.50), (1, 0.40)]);
+        assert_eq!((up, down), (0.0, 0.0));
+        // Empty ladder: nothing at risk (typed empty array for inference)
+        let none: [(i64, f64); 0] = [];
+        assert_eq!(tail_losses(none), (0.0, 0.0));
+    }
+
+    #[test]
+    fn ladder_prefix_groups_by_series_and_expiry() {
+        // Grouping must include the series: two series could share an expiry
+        // string, and their tail risks are unrelated.
+        assert_eq!(ladder_prefix("KXBTCD-26JUL2417-T60499.99"), Some("KXBTCD-26JUL2417"));
+        assert_eq!(ladder_prefix("KXWCGAME-26JUL19ESPARG-TIE"), None); // not a strike leg
+        assert_eq!(ladder_prefix("garbage"), None);
     }
 
     #[test]
