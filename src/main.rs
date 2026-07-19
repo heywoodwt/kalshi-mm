@@ -303,12 +303,13 @@ impl<M: MarketApi> Trader<M> {
         };
         let (mut canceled, mut kept) = (0, 0);
         for order in orders {
-            let ticker = order.get("market_ticker").and_then(Value::as_str).unwrap_or("");
-            let side = order.get("side").and_then(Value::as_str).unwrap_or("");
+            let ticker = order
+                .get("ticker")
+                .or_else(|| order.get("market_ticker"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let position = positions.get(ticker).copied().unwrap_or(0);
-            // Long: keep sell ("no") orders; short: keep buy ("yes") orders
-            let keep = (position > 0 && side == "no") || (position < 0 && side == "yes");
-            if keep {
+            if order_reduces_position(&order, position) {
                 kept += 1;
             } else if let Some(oid) = order.get("order_id").and_then(Value::as_str) {
                 if self.api.cancel_order(oid).await.is_ok() {
@@ -1141,6 +1142,19 @@ impl<M: MarketApi> Trader<M> {
 
 // --- small parsers ---------------------------------------------------------------
 
+/// True if a resting order REDUCES the given signed YES-frame position.
+/// Direction is `action` ALONE (buy = +yes, sell = -yes) — the same
+/// exchange rule as fills; `side` (yes/no) only selects the price field and
+/// must never be used for direction (the original heuristic did, and
+/// canceled every position-reducing order at startup).
+fn order_reduces_position(order: &Value, position: i64) -> bool {
+    match order.get("action").and_then(Value::as_str) {
+        Some("sell") => position > 0,
+        Some("buy") => position < 0,
+        _ => false,
+    }
+}
+
 fn json_f64(v: Option<&Value>) -> Option<f64> {
     match v? {
         Value::Number(n) => n.as_f64(),
@@ -1176,6 +1190,29 @@ fn parse_positions(resp: &Value) -> HashMap<String, i64> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn startup_hygiene_keeps_position_reducing_orders() {
+        // Regression for the 2026-07-19 deploy: the old classifier read
+        // `market_ticker` (live records carry `ticker`) and keyed direction
+        // off `side` (yes/no — which only selects the PRICE field). It
+        // therefore canceled all 45 legacy-unwind exit orders on every boot.
+        // Direction is `action` alone (same YES-frame rule as fills).
+        let order = |action: &str, side: &str| {
+            json!({"ticker": "T", "action": action, "side": side, "order_id": "o"})
+        };
+        // Long: sells reduce (keep), buys extend (cancel) — either side field
+        assert!(order_reduces_position(&order("sell", "yes"), 3));
+        assert!(order_reduces_position(&order("sell", "no"), 3));
+        assert!(!order_reduces_position(&order("buy", "yes"), 3));
+        // Short: buys reduce (keep), sells extend (cancel)
+        assert!(order_reduces_position(&order("buy", "no"), -2));
+        assert!(order_reduces_position(&order("buy", "yes"), -2));
+        assert!(!order_reduces_position(&order("sell", "no"), -2));
+        // Flat or unknown: nothing to reduce — cancel
+        assert!(!order_reduces_position(&order("sell", "yes"), 0));
+        assert!(!order_reduces_position(&json!({"ticker": "T"}), 3));
+    }
 
     #[test]
     fn parse_positions_handles_v2_and_legacy() {
