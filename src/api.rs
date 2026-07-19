@@ -205,6 +205,14 @@ impl KalshiClient {
         self.request(reqwest::Method::GET, "/portfolio/fills", &params, None).await
     }
 
+    /// Newest-first page of settled markets. No ticker filter server-side:
+    /// callers search the page — a settlement being resolved just happened,
+    /// so it's always near the top.
+    pub async fn get_settlements(&self, limit: u32) -> Result<Value, ApiError> {
+        let params = vec![("limit", limit.to_string())];
+        self.request(reqwest::Method::GET, "/portfolio/settlements", &params, None).await
+    }
+
     pub async fn get_orders(&self, status: Option<&str>, limit: u32) -> Result<Value, ApiError> {
         let mut params = vec![("limit", limit.to_string())];
         if let Some(s) = status {
@@ -311,6 +319,10 @@ pub trait MarketApi: OrderApi {
         cursor: Option<&str>,
         ticker: Option<&str>,
     ) -> impl std::future::Future<Output = Result<Value, ApiError>> + Send;
+    fn get_settlements(
+        &self,
+        limit: u32,
+    ) -> impl std::future::Future<Output = Result<Value, ApiError>> + Send;
     fn get_orders(
         &self,
         status: Option<&str>,
@@ -365,6 +377,9 @@ impl MarketApi for KalshiClient {
         ticker: Option<&str>,
     ) -> Result<Value, ApiError> {
         KalshiClient::get_fills(self, min_ts, limit, cursor, ticker).await
+    }
+    async fn get_settlements(&self, limit: u32) -> Result<Value, ApiError> {
+        KalshiClient::get_settlements(self, limit).await
     }
     async fn get_orders(&self, status: Option<&str>, limit: u32) -> Result<Value, ApiError> {
         KalshiClient::get_orders(self, status, limit).await

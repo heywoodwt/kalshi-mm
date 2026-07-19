@@ -113,6 +113,10 @@ impl MarketApi for PaperClient {
         Ok(json!({"fills": []})) // resting paper orders are never matched
     }
 
+    async fn get_settlements(&self, _limit: u32) -> Result<Value, ApiError> {
+        Ok(json!({"settlements": []})) // paper positions never settle on-exchange
+    }
+
     async fn get_orders(&self, status: Option<&str>, _limit: u32) -> Result<Value, ApiError> {
         let orders: Vec<Value> = self
             .orders

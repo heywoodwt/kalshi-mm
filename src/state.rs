@@ -158,6 +158,33 @@ pub fn replay_entry_price(fills: &[NormalizedFill]) -> (i64, Option<f64>) {
     (position, entry_price)
 }
 
+/// One /portfolio/settlements record reduced to what booking needs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NormalizedSettlement {
+    pub ticker: String,
+    /// Some(true)=settled yes, Some(false)=settled no. None for anything
+    /// else (voided/scalar results) — the position is cleared without PnL.
+    pub result_yes: Option<bool>,
+}
+
+/// Reduce a raw /portfolio/settlements entry. Returns None only when the
+/// record is unusable (no ticker). The settlement `fee_cost` field is the
+/// AGGREGATE of the trading fees already booked per-fill (verified against
+/// live records), so it is deliberately not extracted — booking it again
+/// would double-count fees.
+pub fn normalize_settlement(rec: &Value) -> Option<NormalizedSettlement> {
+    let ticker = str_field(rec, &["ticker", "market_ticker"])?;
+    let result_yes = match rec.get("market_result").and_then(Value::as_str) {
+        Some("yes") => Some(true),
+        Some("no") => Some(false),
+        _ => None,
+    };
+    Some(NormalizedSettlement {
+        ticker: ticker.to_string(),
+        result_yes,
+    })
+}
+
 /// Everything the bot tracks about one market.
 #[derive(Debug, Default)]
 pub struct TickerState {
@@ -361,15 +388,7 @@ impl TraderState {
         if realized != 0.0 {
             ts.realized_pnl += realized;
             let category = ts.category.clone();
-            self.daily_pnl += realized;
-            self.cumulative_pnl += realized;
-            if realized > 0.0 {
-                self.wins += 1;
-                self.consecutive_losses.insert(category, 0);
-            } else {
-                self.losses += 1;
-                *self.consecutive_losses.entry(category).or_insert(0) += 1;
-            }
+            self.book_realized_close(category, realized);
         }
 
         self.fills += 1;
@@ -384,6 +403,62 @@ impl TraderState {
             self.trade_log.pop_front();
         }
         realized
+    }
+
+    /// Book a market settlement for a still-open local position.
+    ///
+    /// This closes the accounting gap where winners that EXPIRE (ITM longs
+    /// paying $1, shorts expiring worthless) never reached the PnL counters:
+    /// only fill-based round trips were booked, so the log understated real
+    /// PnL and the win/loss-driven kill switches saw a systematically
+    /// pessimistic picture (losers get stopped out via fills; winners expire).
+    ///
+    /// In the YES frame a binary settles at $1 iff result==yes, else $0, so
+    /// realized = position × (settle_value − entry). Wins/losses and the
+    /// per-category consecutive-loss streak update exactly as a fill-based
+    /// close would. The position and entry are cleared in all cases (the
+    /// market no longer exists). Returns the realized PnL, or None when
+    /// nothing was booked: ticker flat/unknown, no cost basis (post-restart
+    /// backfill failed — inventing one would corrupt what this fixes), or a
+    /// non-binary result (void = refunded at cost).
+    pub fn apply_settlement(&mut self, ticker: &str, result_yes: Option<bool>) -> Option<f64> {
+        let ts = self.tickers.get_mut(ticker)?;
+        if ts.position == 0 {
+            return None; // round trip already booked via fills
+        }
+        let position = ts.position;
+        let entry = ts.entry_price;
+        ts.position = 0;
+        ts.entry_price = None;
+        let (Some(entry), Some(result_yes)) = (entry, result_yes) else {
+            return None;
+        };
+        let settle_value = if result_yes { 1.0 } else { 0.0 };
+        let realized = position as f64 * (settle_value - entry);
+        let category = ts.category.clone();
+        ts.realized_pnl += realized;
+        self.book_realized_close(category, realized);
+        Some(realized)
+    }
+
+    /// Fold one realized close — fill-based or settlement-based — into the
+    /// account counters: daily/cumulative PnL, win/loss tally, and the
+    /// per-category consecutive-loss streak the kill switch reads. Shared so
+    /// the two close paths can't drift apart. No-op at exactly zero (a
+    /// scratch close is neither a win nor a loss).
+    fn book_realized_close(&mut self, category: String, realized: f64) {
+        if realized == 0.0 {
+            return;
+        }
+        self.daily_pnl += realized;
+        self.cumulative_pnl += realized;
+        if realized > 0.0 {
+            self.wins += 1;
+            self.consecutive_losses.insert(category, 0);
+        } else {
+            self.losses += 1;
+            *self.consecutive_losses.entry(category).or_insert(0) += 1;
+        }
     }
 
     /// Zero the daily counters (called at local-date rollover).
@@ -612,6 +687,110 @@ mod tests {
         // Newest ids still deduped, oldest evicted
         assert!(s.seen_fill("id-24999"));
         assert!(!s.seen_fill("id-0"));
+    }
+
+    /// Raw /portfolio/settlements record with the exact field shapes the
+    /// live API returns (string counts/fees, integer-cents revenue).
+    fn sett_json(ticker: &str, result: &str) -> Value {
+        json!({
+            "ticker": ticker, "event_ticker": "KXADP-26JUL",
+            "market_result": result, "revenue": 100,
+            "yes_count_fp": "1.00", "no_count_fp": "0.00",
+            "yes_total_cost_dollars": "0.790000", "no_total_cost_dollars": "0.000000",
+            "fee_cost": "0.018600", "settled_time": "2026-07-17T21:02:27.000000Z",
+        })
+    }
+
+    #[test]
+    fn normalize_settlement_parses_ticker_and_result() {
+        let s = normalize_settlement(&sett_json("KXADP-26JUL-T0", "yes")).unwrap();
+        assert_eq!(s.ticker, "KXADP-26JUL-T0");
+        assert_eq!(s.result_yes, Some(true));
+        let s = normalize_settlement(&sett_json("KXADP-26JUL-T0", "no")).unwrap();
+        assert_eq!(s.result_yes, Some(false));
+        // Voided/scalar results still identify the market but carry no
+        // binary payout — caller clears the position without booking PnL
+        let s = normalize_settlement(&sett_json("KXADP-26JUL-T0", "void")).unwrap();
+        assert_eq!(s.result_yes, None);
+        // No ticker -> unusable
+        assert!(normalize_settlement(&json!({"market_result": "yes"})).is_none());
+    }
+
+    #[test]
+    fn settlement_books_long_expiring_itm_as_win() {
+        // The prod leak: buy 1 @ 0.79, market settles yes -> contract pays
+        // $1.00. The +$0.21 was previously never booked (only the -$0.01 fee
+        // was), so the log counter showed a loss on a profitable trade.
+        let mut s = TraderState::new(0.0);
+        apply(&mut s, &fill_json("buy", "yes", 0.79, 1.0, false, "a"));
+        let realized = s.apply_settlement("KXADP-26JUL-T0", Some(true));
+        assert!((realized.unwrap() - 0.21).abs() < 1e-9);
+        let ts = &s.tickers["KXADP-26JUL-T0"];
+        assert_eq!(ts.position, 0);
+        assert_eq!(ts.entry_price, None);
+        assert!((ts.realized_pnl - 0.21).abs() < 1e-9);
+        assert_eq!((s.wins, s.losses), (1, 0));
+        // 0.21 payout minus the $0.01 maker fee booked on the fill
+        assert!((s.daily_pnl - 0.20).abs() < 1e-9);
+        assert!((s.cumulative_pnl - 0.20).abs() < 1e-9);
+        assert_eq!(s.consecutive_losses.get("KXADP").copied(), Some(0));
+    }
+
+    #[test]
+    fn settlement_books_short_expiring_worthless_as_win() {
+        // Prod case (FRAENG TIE): short 4 @ 0.24 avg, result no -> shorts
+        // keep the full premium, +0.96
+        let mut s = TraderState::new(0.0);
+        for i in 0..4 {
+            apply(&mut s, &fill_json("sell", "yes", 0.24, 1.0, false, &format!("s{i}")));
+        }
+        let realized = s.apply_settlement("KXADP-26JUL-T0", Some(false));
+        assert!((realized.unwrap() - 0.96).abs() < 1e-9);
+        assert_eq!(s.tickers["KXADP-26JUL-T0"].position, 0);
+        assert_eq!(s.wins, 1);
+    }
+
+    #[test]
+    fn settlement_books_short_run_over_as_loss_feeding_kill_switch() {
+        // Short 2 @ 0.232 settles yes -> pay $1 each: -2 * (1 - 0.232)
+        let mut s = TraderState::new(0.0);
+        apply(&mut s, &fill_json("sell", "yes", 0.232, 2.0, false, "s"));
+        let realized = s.apply_settlement("KXADP-26JUL-T0", Some(true));
+        assert!((realized.unwrap() - (-1.536)).abs() < 1e-9);
+        assert_eq!((s.wins, s.losses), (0, 1));
+        // Settlement losses must feed the same per-category streak the
+        // fill-based kill switch reads, or expiring losers evade it
+        assert_eq!(s.consecutive_losses.get("KXADP").copied(), Some(1));
+    }
+
+    #[test]
+    fn settlement_books_nothing_when_flat_or_unknown() {
+        let mut s = TraderState::new(0.0);
+        // Never-traded ticker: nothing to book
+        assert_eq!(s.apply_settlement("KXADP-26JUL-T0", Some(true)), None);
+        // Flat ticker (round trip already booked via fills): nothing to book
+        apply(&mut s, &fill_json("buy", "yes", 0.40, 1.0, false, "a"));
+        apply(&mut s, &fill_json("sell", "yes", 0.45, 1.0, false, "b"));
+        assert_eq!(s.apply_settlement("KXADP-26JUL-T0", Some(true)), None);
+        assert_eq!((s.wins, s.losses), (1, 0)); // unchanged by settlement
+
+        // Unknown cost basis (post-restart, backfill failed): clear the
+        // position so it stops counting as open, but book no PnL — a made-up
+        // basis would corrupt the counters this exists to fix
+        let ts = s.ticker("KXADP-26JUL-T1", "KXADP");
+        ts.position = 3;
+        ts.entry_price = None;
+        assert_eq!(s.apply_settlement("KXADP-26JUL-T1", Some(true)), None);
+        assert_eq!(s.tickers["KXADP-26JUL-T1"].position, 0);
+
+        // Void result: refunded at cost, clear without PnL
+        let ts = s.ticker("KXADP-26JUL-T2", "KXADP");
+        ts.position = -2;
+        ts.entry_price = Some(0.30);
+        let daily_before = s.daily_pnl;
+        assert_eq!(s.apply_settlement("KXADP-26JUL-T2", None), None);
+        assert_eq!(s.tickers["KXADP-26JUL-T2"].position, 0);
+        assert!((s.daily_pnl - daily_before).abs() < 1e-12);
     }
 
     #[test]

@@ -34,7 +34,7 @@ use kalshi_mm::ladder::Ladders;
 use kalshi_mm::model::Policy;
 use kalshi_mm::paper::PaperClient;
 use kalshi_mm::spot::{trend_gated, SpotFeed, SpotState, COINBASE_WS_URL};
-use kalshi_mm::state::{normalize_fill, replay_entry_price, TraderState};
+use kalshi_mm::state::{normalize_fill, normalize_settlement, replay_entry_price, TraderState};
 use kalshi_mm::transport::{WsClient, WsEvent, PROD_WS_URL};
 use kalshi_mm::{book, executor, state};
 
@@ -183,7 +183,14 @@ struct Trader<M: MarketApi> {
     /// fill may be unbooked for up to 5s (fills poll), and a second
     /// full-size exit would drive the position through flat into a reversal.
     spot_unwind_fired_until: HashMap<String, f64>,
+    /// ticker -> how many syncs a vanished position has waited for its
+    /// settlement record (the settlements feed can lag the positions feed).
+    settlement_checks: HashMap<String, u32>,
 }
+
+/// Give a vanished position this many sync cycles (30s each) to show up in
+/// /portfolio/settlements before falling back to plain drift-zeroing.
+const MAX_SETTLEMENT_CHECKS: u32 = 4;
 
 async fn run_trader<M: MarketApi>(
     api: M,
@@ -212,6 +219,7 @@ async fn run_trader<M: MarketApi>(
         spot_gate_on: false,
         spot_unwind_next: HashMap::new(),
         spot_unwind_fired_until: HashMap::new(),
+        settlement_checks: HashMap::new(),
     };
 
     trader.optimize_startup_orders().await;
@@ -791,17 +799,21 @@ impl<M: MarketApi> Trader<M> {
                   entry_before.unwrap_or(nf.price_yes), nf.price_yes);
         }
 
-        // Per-category kill switch: after N consecutive losing round-trips in
-        // a category, halt it (stop quoting its markets). apply_fill maintains
-        // consecutive_losses (reset to 0 on any winning close); we only read
-        // it here. 0 = disabled. Halt is sticky for the session — a tripped
-        // breaker stays tripped until restart.
+        self.enforce_category_halt(&category);
+    }
+
+    /// Per-category kill switch: after N consecutive losing closes in a
+    /// category, halt it (stop quoting its markets). apply_fill and
+    /// apply_settlement maintain consecutive_losses (reset to 0 on any
+    /// winning close); this only reads it. 0 = disabled. Halt is sticky for
+    /// the session — a tripped breaker stays tripped until restart.
+    fn enforce_category_halt(&mut self, category: &str) {
         let limit = self.cfg.live.halt_on_consecutive_losses;
-        if limit > 0 && !self.state.halted_categories.contains(&category) {
-            let losses = self.state.consecutive_losses.get(&category).copied().unwrap_or(0);
+        if limit > 0 && !self.state.halted_categories.contains(category) {
+            let losses = self.state.consecutive_losses.get(category).copied().unwrap_or(0);
             if losses >= limit {
                 warn!("HALTING CATEGORY {category}: {losses} consecutive losses (limit {limit})");
-                self.state.halted_categories.insert(category);
+                self.state.halted_categories.insert(category.to_string());
             }
         }
     }
@@ -824,12 +836,23 @@ impl<M: MarketApi> Trader<M> {
             .map(|(t, _)| t.clone())
             .collect();
         let mut drift = 0;
+        let mut vanished: Vec<String> = Vec::new();
         let all: HashSet<String> = exchange.keys().cloned().chain(local_nonzero).collect();
         for ticker in all {
             let remote = exchange.get(&ticker).copied().unwrap_or(0);
             let category = self.active_tickers.get(&ticker).cloned().unwrap_or_default();
             let ts = self.state.ticker(&ticker, &category);
             if ts.position != remote {
+                // A held position on a market this bot quotes that DISAPPEARS
+                // from the exchange almost always means the market SETTLED.
+                // Plain zeroing here silently discarded the settlement PnL
+                // (winners that expire ITM were never booked, so the counters
+                // and loss-halts ran systematically pessimistic) — route
+                // through the settlement lookup instead of correcting now.
+                if remote == 0 && self.active_tickers.contains_key(&ticker) {
+                    vanished.push(ticker);
+                    continue;
+                }
                 warn!("POSITION DRIFT: {ticker} local={} exchange={remote}, correcting", ts.position);
                 ts.position = remote;
                 drift += 1;
@@ -837,6 +860,9 @@ impl<M: MarketApi> Trader<M> {
         }
         info!("Synced {} positions from Kalshi{}", exchange.len(),
               if drift > 0 { format!(" ({drift} drifts corrected)") } else { String::new() });
+        if !vanished.is_empty() {
+            self.resolve_vanished_positions(vanished).await;
+        }
 
         // entry_price is in-memory only — a restart re-syncs `position` from
         // the exchange above but has no cost basis for it, so the next fill
@@ -857,6 +883,70 @@ impl<M: MarketApi> Trader<M> {
             .collect();
         for ticker in needs_backfill {
             self.backfill_entry_price(&ticker).await;
+        }
+    }
+
+    /// Book settlements for held positions that vanished from the exchange.
+    ///
+    /// One newest-first settlements page covers every ticker at once (a
+    /// daily ladder settles as a batch). A ticker found there books through
+    /// `apply_settlement` — realized PnL, win/loss, and the same per-category
+    /// kill switch a fill-based close feeds. A ticker NOT found stays
+    /// untouched and retries next sync: the settlements feed can lag the
+    /// positions feed, and booking is only possible while the local position
+    /// still exists. After MAX_SETTLEMENT_CHECKS misses it's zeroed as plain
+    /// drift so a true desync can't wedge the accounting forever.
+    async fn resolve_vanished_positions(&mut self, tickers: Vec<String>) {
+        let resp = match self.api.get_settlements(200).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                error!("Error fetching settlements: {e}");
+                return; // positions untouched; next sync retries
+            }
+        };
+        let settled: HashMap<String, Option<bool>> = resp
+            .get("settlements")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(normalize_settlement)
+            .map(|s| (s.ticker, s.result_yes))
+            .collect();
+        for ticker in tickers {
+            // The fills poll (5s) may have flattened it since the position
+            // snapshot was taken — nothing left to resolve then
+            if self.state.tickers.get(&ticker).map(|ts| ts.position).unwrap_or(0) == 0 {
+                self.settlement_checks.remove(&ticker);
+                continue;
+            }
+            let Some(&result_yes) = settled.get(&ticker) else {
+                let checks = self.settlement_checks.entry(ticker.clone()).or_insert(0);
+                *checks += 1;
+                if *checks >= MAX_SETTLEMENT_CHECKS {
+                    warn!("POSITION DRIFT: {ticker} vanished with no settlement record \
+                           after {checks} checks — zeroing, PnL may be unbooked");
+                    if let Some(ts) = self.state.tickers.get_mut(&ticker) {
+                        ts.position = 0;
+                        ts.entry_price = None;
+                    }
+                    self.settlement_checks.remove(&ticker);
+                }
+                continue;
+            };
+            self.settlement_checks.remove(&ticker);
+            match self.state.apply_settlement(&ticker, result_yes) {
+                Some(realized) => {
+                    let result = match result_yes {
+                        Some(true) => "yes",
+                        Some(false) => "no",
+                        None => "void",
+                    };
+                    info!("SETTLEMENT: {ticker} result={result} realized ${realized:+.4}");
+                    let category = self.active_tickers.get(&ticker).cloned().unwrap_or_default();
+                    self.enforce_category_halt(&category);
+                }
+                None => info!("SETTLEMENT: {ticker} cleared without PnL (no cost basis or non-binary result)"),
+            }
         }
     }
 
