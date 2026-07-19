@@ -143,6 +143,16 @@ pub struct LiveConfig {
     /// don't opt in behave exactly as before.
     #[serde(default)]
     pub halt_on_consecutive_losses: u64,
+    /// Per-ladder worst-case loss cap (dollars): stop ADDING exposure on a
+    /// side once the ladder's scenario loss in that direction reaches this.
+    /// 0 disables (documented opt-out, unlike the no-default loss limits —
+    /// existing configs predate this cap and must keep loading).
+    #[serde(default = "default_max_ladder_tail_loss")]
+    pub max_ladder_tail_loss: f64,
+}
+
+fn default_max_ladder_tail_loss() -> f64 {
+    5.0
 }
 
 fn default_checkpoint_prefix() -> String {
@@ -198,6 +208,12 @@ impl Config {
                 self.spot.gate_ret_60s,
                 self.spot.stale_max_s,
                 self.spot.gate_release_ratio
+            );
+        }
+        if self.live.max_ladder_tail_loss < 0.0 {
+            bail!(
+                "max_ladder_tail_loss must be >= 0 (0 disables), got {}",
+                self.live.max_ladder_tail_loss
             );
         }
         Ok(())
@@ -282,6 +298,28 @@ mod tests {
         let adp = cfg.categories.iter().find(|c| c.name == "KXADP").unwrap();
         assert_eq!(adp.max_inventory, 5);
         assert_eq!(adp.vol_3mo, 0.021);
+    }
+
+    #[test]
+    fn ladder_tail_cap_defaults_and_validation() {
+        let base = r#"
+            [live]
+            capital = 95.0
+            max_daily_loss = 5.0
+            max_position_value = 40.0
+            stop_loss_threshold = -10.0
+
+            [[categories]]
+            name = "KXBTCD"
+        "#;
+        // Absent -> $5 default (0 would silently disable a risk limit)
+        assert_eq!(parse(base).unwrap().live.max_ladder_tail_loss, 5.0);
+        // Explicit 0 = documented opt-out; negative is a config error
+        let zeroed =
+            base.replace("capital = 95.0", "capital = 95.0\nmax_ladder_tail_loss = 0.0");
+        assert_eq!(parse(&zeroed).unwrap().live.max_ladder_tail_loss, 0.0);
+        let neg = base.replace("capital = 95.0", "capital = 95.0\nmax_ladder_tail_loss = -1.0");
+        assert!(parse(&neg).is_err());
     }
 
     #[test]

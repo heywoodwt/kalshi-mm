@@ -30,7 +30,7 @@ use kalshi_mm::book::TakerSide;
 use kalshi_mm::config::{CategoryConfig, Config};
 use kalshi_mm::engine::{check_risk_limits, exit_decision, plan_quotes, spot_unwind_decision};
 use kalshi_mm::features::build_observation;
-use kalshi_mm::ladder::Ladders;
+use kalshi_mm::ladder::{self, Ladders};
 use kalshi_mm::model::Policy;
 use kalshi_mm::paper::PaperClient;
 use kalshi_mm::spot::{trend_gated, SpotFeed, SpotState, COINBASE_WS_URL};
@@ -579,6 +579,30 @@ impl<M: MarketApi> Trader<M> {
         }
     }
 
+    /// (allow_bid, allow_ask) for `ticker` under the per-ladder tail cap.
+    /// Suppressing a side stops ADDING exposure in the direction whose
+    /// worst-case ladder loss already reached the cap; existing positions
+    /// stay managed by stops/settlement. Non-strike tickers are never gated.
+    fn ladder_tail_gate(&self, ticker: &str) -> (bool, bool) {
+        let cap = self.cfg.live.max_ladder_tail_loss;
+        if cap <= 0.0 {
+            return (true, true);
+        }
+        let Some(event) = ladder::ladder_prefix(ticker) else {
+            return (true, true);
+        };
+        let entries = self.state.tickers.iter().filter_map(|(t, ts)| {
+            if ts.position == 0 || ladder::ladder_prefix(t) != Some(event) {
+                return None;
+            }
+            // Mark preference: live mid, else cost basis, else 0.5
+            let mark = ts.book.mid().or(ts.entry_price).unwrap_or(0.5);
+            Some((ts.position, mark))
+        });
+        let (up_loss, down_loss) = ladder::tail_losses(entries);
+        (down_loss < cap, up_loss < cap) // bids add down-risk, asks add up-risk
+    }
+
     /// Fold one spot tick: trend-gate edge detection (one-shot cancel of
     /// resting spot-bound quotes) + proactive unwind of adverse inventory.
     async fn on_spot_tick(&mut self, price: f64) {
@@ -721,6 +745,8 @@ impl<M: MarketApi> Trader<M> {
             0.0
         };
 
+        let (allow_bid, allow_ask) = self.ladder_tail_gate(ticker);
+
         let ts = self.state.ticker(ticker, &category);
         let Some(obs) = build_observation(ticker, ts, &self.cfg.mm, epoch_now(), mono_now()) else {
             return;
@@ -748,7 +774,9 @@ impl<M: MarketApi> Trader<M> {
             backoff,
             mono_now(),
         );
-        if let Some(plan) = plan {
+        if let Some(mut plan) = plan {
+            plan.place_bid &= allow_bid;
+            plan.place_ask &= allow_ask;
             executor::apply_quote_plan(&self.api, &self.cfg.mm, &category, ticker, &plan,
                                        &mut self.state, mono_now())
             .await;

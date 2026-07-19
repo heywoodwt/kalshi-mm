@@ -497,6 +497,7 @@ mod tests {
             stop_loss_threshold: -10.0,
             checkpoint_prefix: "x".into(),
             halt_on_consecutive_losses: 0,
+            max_ladder_tail_loss: 5.0,
         };
         let mut state = TraderState::new(0.0);
         assert_eq!(check_risk_limits(&state, &live, None), (true, None));
