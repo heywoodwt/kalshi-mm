@@ -80,7 +80,7 @@ pub async fn apply_quote_plan<A: OrderApi>(
     // Both sides in flight at once; None futures resolve immediately
     let bid = async {
         if plan.place_bid {
-            Some(send_order(api, category, ticker, "buy", plan.bid_cents, 1, true,
+            Some(send_order(api, category, ticker, "buy", plan.bid_cents, plan.bid_size, true,
                             "good_till_canceled").await)
         } else {
             None
@@ -88,7 +88,7 @@ pub async fn apply_quote_plan<A: OrderApi>(
     };
     let ask = async {
         if plan.place_ask {
-            Some(send_order(api, category, ticker, "sell", plan.ask_cents, 1, true,
+            Some(send_order(api, category, ticker, "sell", plan.ask_cents, plan.ask_size, true,
                             "good_till_canceled").await)
         } else {
             None
@@ -189,6 +189,8 @@ mod tests {
             ask_cents: 53.0,
             place_bid: true,
             place_ask: true,
+            bid_size: 1,
+            ask_size: 1,
             cancel_ids: vec![],
             quoted_bid: 0.27,
             quoted_ask: 0.53,

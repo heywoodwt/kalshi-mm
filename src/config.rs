@@ -37,6 +37,13 @@ pub struct MmParams {
     /// lock ~full collateral for pennies of spread.
     pub quote_band_lo: f64,
     pub quote_band_hi: f64,
+    /// Quote size used when a side's planned price sits in the extreme band
+    /// (bid >= 1-band or ask <= band). The extreme-carry trades (deep-ITM
+    /// longs to $1, far-wing shorts to $0) are the measured edge and BTC
+    /// maker fees are $0 — carry more size there, never mid-book.
+    pub extreme_quote_size: i64,
+    /// Band width defining "extreme" (dollars from 0/1).
+    pub extreme_band: f64,
 }
 
 impl Default for MmParams {
@@ -54,6 +61,10 @@ impl Default for MmParams {
             balance_backoff_s: 60.0,
             quote_band_lo: 0.05,
             quote_band_hi: 0.95,
+            // NEW knobs, not mm_config.py mirrors — the "do not improve"
+            // rule applies to the Python-shared values above
+            extreme_quote_size: 2,
+            extreme_band: 0.10,
         }
     }
 }

@@ -46,6 +46,9 @@ pub struct QuotePlan {
     /// False when the inventory cap blocks that side.
     pub place_bid: bool,
     pub place_ask: bool,
+    /// Contracts per side (extreme-band sides may size above quote_size).
+    pub bid_size: i64,
+    pub ask_size: i64,
     /// Stale resting order ids to cancel first.
     pub cancel_ids: Vec<String>,
     /// Dollars — stored on TickerState after execution (tick-move check).
@@ -146,6 +149,12 @@ pub fn plan_quotes(
 
     let (our_bid, our_ask) = clamp_quotes(our_bid, our_ask, best_bid, best_ask, tick)?;
 
+    // Extreme-band sizing: the carry edge lives at the ladder ends and the
+    // per-ladder tail cap (main.rs) bounds what this can accumulate
+    let bid_size =
+        if our_bid >= 1.0 - mm.extreme_band { mm.extreme_quote_size } else { mm.quote_size };
+    let ask_size = if our_ask <= mm.extreme_band { mm.extreme_quote_size } else { mm.quote_size };
+
     if !quote_edge_ok(our_bid, our_ask, mm.maker_fee_rate, 1, mm.min_quote_edge) {
         return None;
     }
@@ -176,8 +185,10 @@ pub fn plan_quotes(
     Some(QuotePlan {
         bid_cents,
         ask_cents,
-        place_bid: (ts.position + 1).abs() <= max_inventory,
-        place_ask: (ts.position - 1).abs() <= max_inventory,
+        place_bid: (ts.position + bid_size).abs() <= max_inventory,
+        place_ask: (ts.position - ask_size).abs() <= max_inventory,
+        bid_size,
+        ask_size,
         cancel_ids,
         quoted_bid: our_bid,
         quoted_ask: our_ask,
@@ -407,6 +418,40 @@ mod tests {
         ts2.position = -5;
         let plan2 = plan_quotes(ACTION, 0.0, &mut ts2, &mm(), 5, 0, 0.0, 100.0).unwrap();
         assert!(plan2.place_bid && !plan2.place_ask);
+    }
+
+    #[test]
+    fn extreme_prices_size_up_that_side_only() {
+        // Deep-ITM book: bid 0.91/ask 0.97 (mid 0.94, inside quote band).
+        // action [-0.9,0] -> half 0.0345: bid ~0.91 (>= 1-band) sizes up to
+        // extreme_quote_size; ask ~0.97 is NOT <= band, stays quote_size.
+        let mut ts = TickerState::new("X");
+        ts.book.load_snapshot(&json!({"yes": [[0.91, 50]], "no": [[0.03, 40]]}));
+        let plan = plan_quotes([-0.9, 0.0], 0.0, &mut ts, &mm(), 5, 0, 0.0, 100.0).unwrap();
+        assert_eq!(plan.bid_size, mm().extreme_quote_size);
+        assert_eq!(plan.ask_size, mm().quote_size);
+        // Mirror: far-OTM book bid 0.03/ask 0.09 -> ask sizes up, bid doesn't
+        let mut ts = TickerState::new("X");
+        ts.book.load_snapshot(&json!({"yes": [[0.03, 50]], "no": [[0.91, 40]]}));
+        let plan = plan_quotes([-0.9, 0.0], 0.0, &mut ts, &mm(), 5, 0, 0.0, 100.0).unwrap();
+        assert_eq!(plan.ask_size, mm().extreme_quote_size);
+        assert_eq!(plan.bid_size, mm().quote_size);
+        // Mid-book quotes stay at base size on both sides
+        let mut ts = wide_ts();
+        let plan = plan_quotes(ACTION, 0.0, &mut ts, &mm(), 5, 0, 0.0, 100.0).unwrap();
+        assert_eq!((plan.bid_size, plan.ask_size), (mm().quote_size, mm().quote_size));
+    }
+
+    #[test]
+    fn inventory_cap_accounts_for_actual_quote_size() {
+        // position 4, cap 5: a 2-lot extreme bid would land at |4+2| = 6 > 5
+        // and must be blocked, where a 1-lot would have been allowed
+        let mut ts = TickerState::new("X");
+        ts.book.load_snapshot(&json!({"yes": [[0.91, 50]], "no": [[0.03, 40]]}));
+        ts.position = 4;
+        let plan = plan_quotes([-0.9, 0.0], 0.0, &mut ts, &mm(), 5, 0, 0.0, 100.0).unwrap();
+        assert!(!plan.place_bid);
+        assert!(plan.place_ask);
     }
 
     #[test]
