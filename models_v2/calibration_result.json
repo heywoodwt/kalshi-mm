@@ -1,0 +1,113 @@
+{
+  "best": {
+    "queue_competitors": 20,
+    "through_fill_haircut": 0.33,
+    "taker_fill_prob": 0.175,
+    "sim_fills_per_ep": 37.49951028403526,
+    "sim_pnl_per_fill": 0.051823176273931106,
+    "err": 7.689097579429965
+  },
+  "targets": {
+    "fills_per_day": 40.0,
+    "pnl_per_fill": -0.003635905123333451,
+    "taker_fraction_pinned": 0.175
+  },
+  "all": [
+    {
+      "queue_competitors": 3,
+      "through_fill_haircut": 0.15,
+      "taker_fill_prob": 0.175,
+      "sim_fills_per_ep": 36.18413320274241,
+      "sim_pnl_per_fill": 0.05320043714811607,
+      "err": 7.911379257967336
+    },
+    {
+      "queue_competitors": 3,
+      "through_fill_haircut": 0.33,
+      "taker_fill_prob": 0.175,
+      "sim_fills_per_ep": 37.49951028403526,
+      "sim_pnl_per_fill": 0.05191696528847912,
+      "err": 7.7019951952046615
+    },
+    {
+      "queue_competitors": 3,
+      "through_fill_haircut": 0.5,
+      "taker_fill_prob": 0.175,
+      "sim_fills_per_ep": 38.18119490695397,
+      "sim_pnl_per_fill": 0.05234202002582323,
+      "err": 7.743405476342532
+    },
+    {
+      "queue_competitors": 5,
+      "through_fill_haircut": 0.15,
+      "taker_fill_prob": 0.175,
+      "sim_fills_per_ep": 36.18511263467189,
+      "sim_pnl_per_fill": 0.053320927053728526,
+      "err": 7.927924223450873
+    },
+    {
+      "queue_competitors": 5,
+      "through_fill_haircut": 0.33,
+      "taker_fill_prob": 0.175,
+      "sim_fills_per_ep": 37.49951028403526,
+      "sim_pnl_per_fill": 0.05190369968918955,
+      "err": 7.700170945280697
+    },
+    {
+      "queue_competitors": 5,
+      "through_fill_haircut": 0.5,
+      "taker_fill_prob": 0.175,
+      "sim_fills_per_ep": 38.17727717923604,
+      "sim_pnl_per_fill": 0.05239261183372244,
+      "err": 7.750460670368916
+    },
+    {
+      "queue_competitors": 10,
+      "through_fill_haircut": 0.15,
+      "taker_fill_prob": 0.175,
+      "sim_fills_per_ep": 36.22331047992164,
+      "sim_pnl_per_fill": 0.053192811756435227,
+      "err": 7.909351202459655
+    },
+    {
+      "queue_competitors": 10,
+      "through_fill_haircut": 0.33,
+      "taker_fill_prob": 0.175,
+      "sim_fills_per_ep": 37.49951028403526,
+      "sim_pnl_per_fill": 0.051863555514926746,
+      "err": 7.694650425231208
+    },
+    {
+      "queue_competitors": 10,
+      "through_fill_haircut": 0.5,
+      "taker_fill_prob": 0.175,
+      "sim_fills_per_ep": 38.17727717923604,
+      "sim_pnl_per_fill": 0.05244525556496234,
+      "err": 7.757700096241453
+    },
+    {
+      "queue_competitors": 20,
+      "through_fill_haircut": 0.15,
+      "taker_fill_prob": 0.175,
+      "sim_fills_per_ep": 36.18413320274241,
+      "sim_pnl_per_fill": 0.05319396789735818,
+      "err": 7.910489623813192
+    },
+    {
+      "queue_competitors": 20,
+      "through_fill_haircut": 0.33,
+      "taker_fill_prob": 0.175,
+      "sim_fills_per_ep": 37.49951028403526,
+      "sim_pnl_per_fill": 0.051823176273931106,
+      "err": 7.689097579429965
+    },
+    {
+      "queue_competitors": 20,
+      "through_fill_haircut": 0.5,
+      "taker_fill_prob": 0.175,
+      "sim_fills_per_ep": 38.17727717923604,
+      "sim_pnl_per_fill": 0.05236331400668737,
+      "err": 7.7464317111357595
+    }
+  ]
+}

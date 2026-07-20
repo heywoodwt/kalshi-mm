@@ -1,0 +1,63 @@
+{
+  "KXBTCD": {
+    "n_fills": 280,
+    "active_days": 7,
+    "fills_per_active_day": 40.0,
+    "markout_5m_mean": -0.0012325408811090625,
+    "markout_15m_mean": -0.0013711560315165983,
+    "fee_per_contract_mean": 0.0024033642422243884,
+    "taker_fraction": 0.175,
+    "n_markout_samples": 14
+  },
+  "KXWCGAME": {
+    "n_fills": 37,
+    "active_days": 9,
+    "fills_per_active_day": 4.111111111111111,
+    "markout_5m_mean": -0.08207467969428969,
+    "markout_15m_mean": -0.02511367854475908,
+    "fee_per_contract_mean": 0.003420270270270271,
+    "taker_fraction": 0.02702702702702703,
+    "n_markout_samples": 5
+  },
+  "KXADP": {
+    "n_fills": 60,
+    "active_days": 2,
+    "fills_per_active_day": 30.0,
+    "markout_5m_mean": 0.0,
+    "markout_15m_mean": 0.001428571428571428,
+    "fee_per_contract_mean": 0.010808333333333333,
+    "taker_fraction": 0.9333333333333333,
+    "n_markout_samples": 7
+  },
+  "KXAAAGASM": {
+    "n_fills": 24,
+    "active_days": 4,
+    "fills_per_active_day": 6.0,
+    "markout_5m_mean": -0.005333333333333319,
+    "markout_15m_mean": -0.012859129492504959,
+    "fee_per_contract_mean": 0.006477083333333332,
+    "taker_fraction": 0.6666666666666666,
+    "n_markout_samples": 3
+  },
+  "fee_cost_unit": "dollars",
+  "_fee_examples": {
+    "maker": {
+      "ticker": "KXBTCD-26JUL2417-T63499.99",
+      "price": 0.66,
+      "count": 1.0,
+      "fee_cost_raw": "0.000000",
+      "is_taker": false,
+      "formula_pred_dollars": 0.01,
+      "formula_pred_cents": 1.0
+    },
+    "taker": {
+      "ticker": "KXBTCD-26JUL2017-T65999.99",
+      "price": 0.15,
+      "count": 2.0,
+      "fee_cost_raw": "0.017900",
+      "is_taker": true,
+      "formula_pred_dollars": 0.02,
+      "formula_pred_cents": 2.0
+    }
+  }
+}
