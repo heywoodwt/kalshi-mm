@@ -12,3 +12,7 @@ target/
 # NEVER commit. (The bot's key is shipped to the instance out-of-band.)
 /mm_ppo_bot.txt
 *.pem
+# Real-money trade record fetched from the exchange (exchange-truth DATA,
+# not code) — the RL retrain consumes these on the HPC. NEVER commit.
+real_fills.jsonl
+real_settlements.jsonl
