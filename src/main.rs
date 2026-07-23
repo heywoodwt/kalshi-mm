@@ -834,8 +834,10 @@ impl<M: MarketApi> Trader<M> {
     /// Per-category kill switch: after N consecutive losing closes in a
     /// category, halt it (stop quoting its markets). apply_fill and
     /// apply_settlement maintain consecutive_losses (reset to 0 on any
-    /// winning close); this only reads it. 0 = disabled. Halt is sticky for
-    /// the session — a tripped breaker stays tripped until restart.
+    /// winning close); this only reads it. 0 = disabled. The halt is a DAILY
+    /// circuit breaker: it stays tripped for the rest of the local day, then
+    /// reset_daily clears it (and the streak) so the category quotes again the
+    /// next day instead of latching until a manual restart.
     fn enforce_category_halt(&mut self, category: &str) {
         let limit = self.cfg.live.halt_on_consecutive_losses;
         if limit > 0 && !self.state.halted_categories.contains(category) {

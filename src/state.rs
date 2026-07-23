@@ -496,10 +496,18 @@ impl TraderState {
     }
 
     /// Zero the daily counters (called at local-date rollover).
+    ///
+    /// This also releases the per-category kill switch: `halted_categories`
+    /// and the `consecutive_losses` streaks it reads are cleared so the breaker
+    /// recovers each day instead of latching for the whole process lifetime.
+    /// (A single 3-loss run on 2026-07-21 otherwise silenced KXBTCD for ~42h
+    /// until a manual restart — see main.rs::enforce_category_halt.)
     pub fn reset_daily(&mut self, now_epoch_s: f64) {
         self.daily_pnl = 0.0;
         self.quotes_sent = 0;
         self.fills = 0;
+        self.halted_categories.clear();
+        self.consecutive_losses.clear();
         self.last_reset = now_epoch_s;
     }
 }
@@ -621,6 +629,27 @@ mod tests {
         apply(&mut s, &fill_json("buy", "yes", 0.50, 1.0, false, "bw"));
         apply(&mut s, &fill_json("sell", "yes", 0.60, 1.0, false, "sw"));
         assert_eq!(s.consecutive_losses.get("KXADP").copied(), Some(0));
+    }
+
+    #[test]
+    fn daily_reset_clears_halt_and_loss_streak() {
+        // Regression: the per-category kill switch was "sticky for the
+        // session" — a tripped halt (and its consecutive-loss streak) survived
+        // the daily reset, so a single 3-loss run on 2026-07-21 silenced KXBTCD
+        // for ~42h until a manual restart. The daily reset must clear BOTH so
+        // the breaker recovers each day instead of latching forever.
+        let mut s = TraderState::new(0.0);
+        s.halted_categories.insert("KXBTCD".to_string());
+        s.consecutive_losses.insert("KXBTCD".to_string(), 3);
+
+        s.reset_daily(86_400.0);
+
+        assert!(s.halted_categories.is_empty(), "halt must clear on daily reset");
+        assert_eq!(
+            s.consecutive_losses.get("KXBTCD").copied().unwrap_or(0),
+            0,
+            "loss streak must clear on daily reset"
+        );
     }
 
     #[test]
