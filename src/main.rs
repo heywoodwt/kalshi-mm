@@ -19,7 +19,7 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use fs2::FileExt;
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -186,11 +186,22 @@ struct Trader<M: MarketApi> {
     /// ticker -> how many syncs a vanished position has waited for its
     /// settlement record (the settlements feed can lag the positions feed).
     settlement_checks: HashMap<String, u32>,
+    /// Publishes the tradeable universe to the WebSocket task after a refresh
+    /// so it can subscribe to newly-opened markets. None when running without
+    /// a WebSocket (REST polling / no credentials).
+    universe_tx: Option<watch::Sender<Vec<String>>>,
 }
 
 /// Give a vanished position this many sync cycles (30s each) to show up in
 /// /portfolio/settlements before falling back to plain drift-zeroing.
 const MAX_SETTLEMENT_CHECKS: u32 = 4;
+
+/// How often to re-discover open markets. Hourly series (KXBTCD) expire and
+/// reopen continuously; without a refresh the bot's universe is frozen at boot
+/// and it silently stops quoting once that cohort expires (the 2026-07-24
+/// outage). 15 min is well inside an hourly market's life and costs one
+/// paginated /markets walk per category.
+const MARKET_REFRESH_S: u64 = 900;
 
 async fn run_trader<M: MarketApi>(
     api: M,
@@ -220,12 +231,13 @@ async fn run_trader<M: MarketApi>(
         spot_unwind_next: HashMap::new(),
         spot_unwind_fired_until: HashMap::new(),
         settlement_checks: HashMap::new(),
+        universe_tx: None,
     };
 
     trader.optimize_startup_orders().await;
     trader.load_policies(&args.models_dir)?;
     trader.discover_markets().await;
-    trader.fetch_market_details().await;
+    trader.fetch_market_details(&trader.all_entries()).await;
     trader.sync_positions().await;
 
     trader.ladders = Ladders::build(trader.active_tickers.keys().map(String::as_str));
@@ -236,10 +248,15 @@ async fn run_trader<M: MarketApi>(
     let use_ws = match (&api_key, &api_secret) {
         (Some(key), Some(secret)) => match WsClient::new(key, secret, PROD_WS_URL) {
             Ok(ws) => {
+                // Watch channel (not a fixed list): periodic re-discovery
+                // republishes the universe here so the socket picks up
+                // newly-opened markets as hourly series roll over.
                 let tickers: Vec<String> = trader.active_tickers.keys().cloned().collect();
+                let (universe_tx, universe_rx) = watch::channel(tickers);
+                trader.universe_tx = Some(universe_tx);
                 let running = trader.running.clone();
                 let tx = tx.clone();
-                tokio::spawn(async move { ws.run(tickers, tx, running).await });
+                tokio::spawn(async move { ws.run(universe_rx, tx, running).await });
                 true
             }
             Err(e) => {
@@ -271,7 +288,7 @@ async fn run_trader<M: MarketApi>(
     }
 
     // Seed the books with REST snapshots (WS deltas need a baseline)
-    trader.fetch_initial_snapshots().await;
+    trader.fetch_initial_snapshots(&trader.all_entries()).await;
 
     info!("{}", "=".repeat(80));
     info!("Initialization complete - trading on {} markets", trader.active_tickers.len());
@@ -347,8 +364,11 @@ impl<M: MarketApi> Trader<M> {
     }
 
     /// Find all open markets for each category with a loaded policy.
-    async fn discover_markets(&mut self) {
-        info!("Finding active markets...");
+    /// Ask Kalshi which markets are open right now, WITHOUT touching trader
+    /// state. Returns ticker -> category. Kept side-effect free so the
+    /// periodic refresh can diff the result against what we already hold.
+    async fn discover_universe(&self) -> HashMap<String, String> {
+        let mut found: HashMap<String, String> = HashMap::new();
         let categories: Vec<String> = self.policies.keys().cloned().collect();
         for category in categories {
             let mut n = 0;
@@ -377,7 +397,7 @@ impl<M: MarketApi> Trader<M> {
                         warn!("Filtered out ticker {ticker} — does not match category {category}");
                         continue;
                     }
-                    self.active_tickers.insert(ticker.to_string(), category.clone());
+                    found.insert(ticker.to_string(), category.clone());
                     n += 1;
                 }
                 // A blank/absent cursor marks the last page.
@@ -393,18 +413,96 @@ impl<M: MarketApi> Trader<M> {
                 warn!("✗ No active market for {category}");
             }
         }
+        found
+    }
+
+    /// Startup discovery: seed the tradeable universe from scratch.
+    async fn discover_markets(&mut self) {
+        info!("Finding active markets...");
+        self.active_tickers = self.discover_universe().await;
         self.active_set = self.active_tickers.keys().cloned().collect();
     }
 
+    /// Periodic re-discovery — the fix for the 2026-07-24 outage.
+    ///
+    /// Hourly series (KXBTCD) roll continuously: the tickers open at boot are
+    /// all expired within a day. Without this the bot keeps running happily
+    /// against a universe of dead markets and quotes nothing, with no error
+    /// anywhere. Here we re-discover, subscribe to what's new, and drop what
+    /// has expired.
+    ///
+    /// Pruning rule: only tickers that are BOTH gone from the exchange's open
+    /// list AND flat are dropped. A settled-but-still-held position keeps its
+    /// entry in `active_tickers` so the existing settlement / drift / entry-
+    /// price-backfill paths (which look up category there) behave unchanged.
+    async fn refresh_markets(&mut self) {
+        let discovered = self.discover_universe().await;
+        // An API failure returns an empty map; treating that as "everything
+        // expired" would drop the whole universe, so leave state untouched
+        // and try again on the next tick.
+        if discovered.is_empty() {
+            warn!("Market refresh found no open markets — keeping current universe");
+            return;
+        }
+
+        let (added, removed) = diff_universe(&self.active_tickers, &discovered);
+        // Drop only the expired tickers we hold no inventory in.
+        let prunable: Vec<String> = removed
+            .into_iter()
+            .filter(|t| self.state.tickers.get(t).is_none_or(|ts| ts.position == 0))
+            .collect();
+        if added.is_empty() && prunable.is_empty() {
+            return;
+        }
+
+        for ticker in &prunable {
+            self.active_tickers.remove(ticker);
+        }
+        for ticker in &added {
+            if let Some(category) = discovered.get(ticker) {
+                self.active_tickers.insert(ticker.clone(), category.clone());
+            }
+        }
+        self.active_set = self.active_tickers.keys().cloned().collect();
+
+        // New markets need tick size + close time before they can be quoted,
+        // and a REST snapshot to seed the book that WS deltas then update.
+        if !added.is_empty() {
+            let entries: Vec<(String, String)> = added
+                .iter()
+                .filter_map(|t| discovered.get(t).map(|c| (t.clone(), c.clone())))
+                .collect();
+            self.fetch_market_details(&entries).await;
+            self.fetch_initial_snapshots(&entries).await;
+        }
+
+        // Strike ladders are keyed off the ticker set — rebuild after churn.
+        self.ladders = Ladders::build(self.active_tickers.keys().map(String::as_str));
+
+        // Hand the refreshed universe to the WebSocket task so it subscribes
+        // to the additions without waiting for a reconnect.
+        if let Some(tx) = &self.universe_tx {
+            let _ = tx.send(self.active_tickers.keys().cloned().collect());
+        }
+
+        info!("Market refresh: +{} new, -{} expired, now {} active",
+              added.len(), prunable.len(), self.active_tickers.len());
+    }
+
+    /// Every (ticker, category) pair currently in the tradeable universe.
+    fn all_entries(&self) -> Vec<(String, String)> {
+        self.active_tickers.iter().map(|(t, c)| (t.clone(), c.clone())).collect()
+    }
+
     /// Tick sizes (subpenny detection) + close times, stored per ticker.
-    async fn fetch_market_details(&mut self) {
-        info!("Fetching market details from Kalshi API...");
+    /// Takes an explicit list so the periodic refresh can fetch details for
+    /// only the newly-opened markets instead of re-walking the whole universe.
+    async fn fetch_market_details(&mut self, entries: &[(String, String)]) {
+        info!("Fetching market details for {} markets...", entries.len());
         let mut subpenny = 0;
-        let entries: Vec<(String, String)> =
-            self.active_tickers.iter().map(|(t, c)| (t.clone(), c.clone())).collect();
         for (ticker, category) in entries {
-            let ts = self.state.ticker(&ticker, &category);
-            match self.api.get_market(&ticker).await {
+            let ts = self.state.ticker(ticker, category);
+            match self.api.get_market(ticker).await {
                 Ok(resp) => {
                     let market = resp.get("market").cloned().unwrap_or_default();
                     ts.tick = market
@@ -435,23 +533,22 @@ impl<M: MarketApi> Trader<M> {
                 Err(_) => ts.tick = 0.01,
             }
         }
-        info!("✓ Market details loaded: {subpenny}/{} support subpenny", self.active_tickers.len());
+        info!("✓ Market details loaded: {subpenny}/{} support subpenny", entries.len());
     }
 
-    /// REST snapshots seed the books that WS deltas then update.
-    async fn fetch_initial_snapshots(&mut self) {
-        info!("Fetching initial orderbook snapshots for {} markets...", self.active_tickers.len());
-        let entries: Vec<(String, String)> =
-            self.active_tickers.iter().map(|(t, c)| (t.clone(), c.clone())).collect();
+    /// REST snapshots seed the books that WS deltas then update. Takes an
+    /// explicit list so a refresh only snapshots the newly-opened markets.
+    async fn fetch_initial_snapshots(&mut self, entries: &[(String, String)]) {
+        info!("Fetching initial orderbook snapshots for {} markets...", entries.len());
         let (mut ok, mut failed) = (0u32, 0u32);
         for (ticker, category) in entries {
-            match self.api.get_orderbook(&ticker, 10).await {
+            match self.api.get_orderbook(ticker, 10).await {
                 Ok(resp) => {
                     let payload = resp.get("orderbook").unwrap_or(&resp);
-                    self.state.ticker(&ticker, &category).book.load_snapshot(payload);
+                    self.state.ticker(ticker, category).book.load_snapshot(payload);
                     ok += 1;
                     if ok % 50 == 0 {
-                        info!("Snapshot progress: {ok}/{}", self.active_tickers.len());
+                        info!("Snapshot progress: {ok}/{}", entries.len());
                     }
                     // REST rate-limit headroom (10 req/s is safe)
                     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -459,8 +556,7 @@ impl<M: MarketApi> Trader<M> {
                 Err(_) => failed += 1,
             }
         }
-        info!("✓ Fetched {ok}/{} initial orderbook snapshots ({failed} failed)",
-              self.active_tickers.len());
+        info!("✓ Fetched {ok}/{} initial orderbook snapshots ({failed} failed)", entries.len());
     }
 
     // --- event loop -----------------------------------------------------------
@@ -473,6 +569,10 @@ impl<M: MarketApi> Trader<M> {
         let mut daily_tick = tokio::time::interval(Duration::from_secs(60));
         let mut hourly_tick = tokio::time::interval(Duration::from_secs(3600));
         let mut poll_tick = tokio::time::interval(Duration::from_secs(10));
+        // Re-discover markets every 15 min. Hourly series roll on the hour, so
+        // this picks up a new cohort well within the hour it opens, while
+        // staying cheap (one paginated /markets walk per category).
+        let mut discover_tick = tokio::time::interval(Duration::from_secs(MARKET_REFRESH_S));
         // The first interval tick fires immediately; consume them so the
         // hourly report doesn't print at startup etc.
         fills_tick.tick().await;
@@ -481,6 +581,7 @@ impl<M: MarketApi> Trader<M> {
         daily_tick.tick().await;
         hourly_tick.tick().await;
         poll_tick.tick().await;
+        discover_tick.tick().await;
 
         // Fills lookback starts 60s before boot; the API takes epoch SECONDS
         let mut fills_last_ts = epoch_now() as i64 - 60;
@@ -532,6 +633,7 @@ impl<M: MarketApi> Trader<M> {
                 }
                 _ = daily_tick.tick() => self.maybe_daily_reset(),
                 _ = hourly_tick.tick() => self.hourly_report(),
+                _ = discover_tick.tick() => self.refresh_markets().await,
                 _ = poll_tick.tick(), if !use_ws => self.rest_poll().await,
             }
         }
@@ -1195,6 +1297,23 @@ fn parse_positions(resp: &Value) -> HashMap<String, i64> {
     out
 }
 
+/// Compare the tradeable universe we currently hold against a freshly
+/// discovered one, returning `(added, removed)` tickers.
+///
+/// Why this exists: Kalshi series like KXBTCD are HOURLY — tickers open and
+/// expire continuously. A bot that discovers markets only at startup slowly
+/// goes blind as its boot-time cohort expires, which is exactly what took the
+/// bot down on 2026-07-24. The trader calls this on a timer so it can
+/// subscribe to what's new and forget what's dead.
+fn diff_universe(
+    old: &HashMap<String, String>,
+    new: &HashMap<String, String>,
+) -> (Vec<String>, Vec<String>) {
+    let added = new.keys().filter(|t| !old.contains_key(*t)).cloned().collect();
+    let removed = old.keys().filter(|t| !new.contains_key(*t)).cloned().collect();
+    (added, removed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1234,5 +1353,236 @@ mod tests {
         assert_eq!(map["B"], -2);
         let legacy = json!({"positions": [{"ticker": "C", "position": 5}]});
         assert_eq!(parse_positions(&legacy)["C"], 5);
+    }
+
+    // --- periodic market re-discovery ------------------------------------
+    // Regression for the 2026-07-24 outage: `discover_markets()` ran ONCE at
+    // startup, so the tradeable universe was frozen at boot. KXBTCD is an
+    // hourly series — every ticker found at boot had expired ~24h later, and
+    // the bot then quoted nothing for 7 days while position sync and the spot
+    // gate kept running, so it looked perfectly healthy. `diff_universe` is
+    // what lets the trader refresh that universe on a timer.
+
+    /// Build a ticker -> category map from a list, for terser tests.
+    fn universe(tickers: &[&str]) -> HashMap<String, String> {
+        tickers.iter().map(|t| (t.to_string(), "KXBTCD".to_string())).collect()
+    }
+
+    #[test]
+    fn diff_universe_reports_added_and_removed() {
+        let old = universe(&["A", "B", "C"]);
+        let new = universe(&["B", "C", "D"]);
+        let (mut added, mut removed) = diff_universe(&old, &new);
+        added.sort();
+        removed.sort();
+        assert_eq!(added, vec!["D"], "D is newly open and must be picked up");
+        assert_eq!(removed, vec!["A"], "A expired and must be dropped");
+    }
+
+    #[test]
+    fn diff_universe_handles_total_rollover() {
+        // The exact outage shape: every boot-time ticker expires and a wholly
+        // new cohort opens. Everything old goes, everything new arrives.
+        let old = universe(&["KXBTCD-26JUL2417-T62499.99", "KXBTCD-26JUL2417-T62999.99"]);
+        let new = universe(&["KXBTCD-26AUG0317-T72499.99"]);
+        let (added, removed) = diff_universe(&old, &new);
+        assert_eq!(added, vec!["KXBTCD-26AUG0317-T72499.99"]);
+        assert_eq!(removed.len(), 2, "both expired tickers must be dropped");
+    }
+
+    #[test]
+    fn diff_universe_is_empty_when_nothing_changed() {
+        // The common case: discovery finds the same set, so no churn and no
+        // needless re-subscribe / snapshot refetch.
+        let same = universe(&["A", "B"]);
+        let (added, removed) = diff_universe(&same, &same);
+        assert!(added.is_empty() && removed.is_empty());
+    }
+
+    // --- refresh_markets end-to-end --------------------------------------
+    // `diff_universe` alone doesn't prove the bot recovers from a rollover —
+    // that needs the whole refresh cycle. These drive it against a scripted
+    // API whose open-market list changes between calls, which is precisely
+    // what the live exchange does every hour.
+
+    use kalshi_mm::api::ApiError;
+    use std::sync::Mutex;
+
+    /// Minimal MarketApi double. `get_markets` replays a script: call N
+    /// returns page N (the final entry repeats), letting a test simulate an
+    /// hourly rollover between two discovery passes.
+    struct MockApi {
+        pages: Mutex<Vec<Vec<String>>>,
+        call: std::sync::atomic::AtomicUsize,
+    }
+
+    impl MockApi {
+        fn new(pages: Vec<Vec<&str>>) -> Self {
+            Self {
+                pages: Mutex::new(
+                    pages.iter().map(|p| p.iter().map(|t| t.to_string()).collect()).collect(),
+                ),
+                call: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl kalshi_mm::api::OrderApi for MockApi {
+        async fn place_limit_order(
+            &self, _t: &str, _s: &str, _p: f64, _n: i64, _po: bool, _tif: &str,
+        ) -> Result<Value, ApiError> {
+            Ok(json!({}))
+        }
+        async fn cancel_order(&self, _id: &str) -> Result<Value, ApiError> {
+            Ok(json!({}))
+        }
+    }
+
+    impl MarketApi for MockApi {
+        async fn get_markets(
+            &self, _series: Option<&str>, _status: Option<&str>, _limit: u32,
+            _cursor: Option<&str>,
+        ) -> Result<Value, ApiError> {
+            let pages = self.pages.lock().unwrap();
+            let i = self.call.fetch_add(1, Ordering::Relaxed).min(pages.len() - 1);
+            let markets: Vec<Value> =
+                pages[i].iter().map(|t| json!({"ticker": t})).collect();
+            // No cursor => single page, discovery stops after one call.
+            Ok(json!({"markets": markets}))
+        }
+        async fn get_market(&self, _ticker: &str) -> Result<Value, ApiError> {
+            Ok(json!({"market": {
+                "price_ranges": [{"step": 0.01}],
+                "close_time": "2026-08-03T21:00:00Z",
+            }}))
+        }
+        async fn get_orderbook(&self, _t: &str, _d: u32) -> Result<Value, ApiError> {
+            Ok(json!({"orderbook": {"yes": [], "no": []}}))
+        }
+        async fn get_positions(&self) -> Result<Value, ApiError> {
+            Ok(json!({"market_positions": []}))
+        }
+        async fn get_fills(
+            &self, _min_ts: i64, _l: u32, _c: Option<&str>, _t: Option<&str>,
+        ) -> Result<Value, ApiError> {
+            Ok(json!({"fills": []}))
+        }
+        async fn get_settlements(&self, _l: u32) -> Result<Value, ApiError> {
+            Ok(json!({"settlements": []}))
+        }
+        async fn get_orders(&self, _s: Option<&str>, _l: u32) -> Result<Value, ApiError> {
+            Ok(json!({"orders": []}))
+        }
+        async fn cancel_all_orders(&self) -> Result<u64, ApiError> {
+            Ok(0)
+        }
+    }
+
+    /// Trader wired to a mock API, with one real policy so `discover_universe`
+    /// (which iterates loaded policies) sees the KXBTCD category. Returns None
+    /// when the ONNX model isn't present so the suite still runs without it.
+    fn mock_trader(api: MockApi) -> Option<Trader<MockApi>> {
+        let model = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/models/realistic_20dim_KXBTCD_final.onnx"
+        );
+        let Ok(policy) = Policy::load(model) else {
+            eprintln!("SKIP: {model} missing");
+            return None;
+        };
+        let cfg = Config::load("prod").expect("config/prod.toml loads");
+        let mut policies = HashMap::new();
+        policies.insert("KXBTCD".to_string(), policy);
+        Some(Trader {
+            api,
+            cats: cfg.categories.iter().map(|c| (c.name.clone(), c.clone())).collect(),
+            state: TraderState::new(epoch_now()),
+            policies,
+            active_tickers: HashMap::new(),
+            active_set: HashSet::new(),
+            running: Arc::new(AtomicBool::new(true)),
+            spot: SpotState::new(cfg.spot.fv_ema_tau_s),
+            ladders: Ladders::default(),
+            spot_bound: HashSet::new(),
+            spot_gate_on: false,
+            spot_unwind_next: HashMap::new(),
+            spot_unwind_fired_until: HashMap::new(),
+            settlement_checks: HashMap::new(),
+            universe_tx: None,
+            cfg,
+        })
+    }
+
+    #[tokio::test]
+    async fn refresh_markets_recovers_from_hourly_rollover() {
+        // THE regression test for the 2026-07-24 outage. Discovery first sees
+        // the July 24 cohort; an hour later the exchange only lists the Aug 3
+        // cohort. Before the fix the bot stayed pinned to the dead July
+        // tickers forever and quoted nothing.
+        let api = MockApi::new(vec![
+            vec!["KXBTCD-26JUL2417-T62499.99", "KXBTCD-26JUL2417-T62999.99"],
+            vec!["KXBTCD-26AUG0317-T72499.99", "KXBTCD-26AUG0317-T72749.99"],
+        ]);
+        let Some(mut trader) = mock_trader(api) else { return };
+
+        trader.discover_markets().await;
+        assert_eq!(trader.active_tickers.len(), 2, "boot cohort discovered");
+        assert!(trader.active_tickers.contains_key("KXBTCD-26JUL2417-T62499.99"));
+
+        trader.refresh_markets().await;
+
+        assert_eq!(trader.active_tickers.len(), 2, "universe rolled, not grew");
+        assert!(
+            trader.active_tickers.contains_key("KXBTCD-26AUG0317-T72499.99"),
+            "newly-opened market must be picked up — this is what was broken"
+        );
+        assert!(
+            !trader.active_tickers.contains_key("KXBTCD-26JUL2417-T62499.99"),
+            "expired flat ticker must be pruned"
+        );
+        assert_eq!(trader.active_set, trader.active_tickers.keys().cloned().collect());
+    }
+
+    #[tokio::test]
+    async fn refresh_markets_keeps_expired_ticker_that_still_holds_inventory() {
+        // Pruning must not orphan a position: the settlement / drift / entry-
+        // price paths look the category up in active_tickers, so a ticker we
+        // still hold stays until it settles flat.
+        let api = MockApi::new(vec![
+            vec!["KXBTCD-26JUL2417-T62499.99"],
+            vec!["KXBTCD-26AUG0317-T72499.99"],
+        ]);
+        let Some(mut trader) = mock_trader(api) else { return };
+
+        trader.discover_markets().await;
+        trader.state.ticker("KXBTCD-26JUL2417-T62499.99", "KXBTCD").position = 5;
+
+        trader.refresh_markets().await;
+
+        assert!(
+            trader.active_tickers.contains_key("KXBTCD-26JUL2417-T62499.99"),
+            "expired ticker with an open position must be retained"
+        );
+        assert!(trader.active_tickers.contains_key("KXBTCD-26AUG0317-T72499.99"));
+    }
+
+    #[tokio::test]
+    async fn refresh_markets_keeps_universe_when_discovery_returns_nothing() {
+        // An API failure yields an empty list. Treating that as "everything
+        // expired" would blow away the whole universe and stop all quoting —
+        // exactly the outage we're fixing. Leave state alone and retry later.
+        let api = MockApi::new(vec![
+            vec!["KXBTCD-26AUG0317-T72499.99"],
+            vec![], // failed / empty discovery
+        ]);
+        let Some(mut trader) = mock_trader(api) else { return };
+
+        trader.discover_markets().await;
+        trader.refresh_markets().await;
+
+        assert_eq!(
+            trader.active_tickers.len(), 1,
+            "an empty discovery must not clear the universe"
+        );
     }
 }
