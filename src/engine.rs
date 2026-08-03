@@ -195,53 +195,98 @@ pub fn plan_quotes(
     })
 }
 
-/// Stop-loss / expiry check for one open position.
+/// Stop-loss / expiry check for one open position. Exits cross the book
+/// (long -> sell at the bid, short -> buy the ask).
 ///
-/// Stop threshold = max(floor, 2x spread): in a wide market the mid wobbles
-/// from one side refreshing — exiting on that noise converts temporary marks
-/// into realized taker losses. Exits cross the book (long -> sell at bid).
+/// Two independent triggers, with deliberately different preconditions:
+/// `expiry_imminent` (a clock deadline, always evaluable) and
+/// `stop_loss_triggered` (a mark-to-market judgement needing an entry price and
+/// a two-sided book). Returns `None` when neither fires, and also when one
+/// fires but the side we would cross into is empty — see the caller, which
+/// reports that case rather than dropping it silently.
 pub fn exit_decision(ts: &TickerState, now_s: f64) -> Option<ExitPlan> {
     if ts.position == 0 {
         return None;
     }
-    let entry = ts.entry_price?;
-    if !ts.book.is_valid() {
-        return None;
-    }
-    let best_bid = ts.book.best_bid()?;
-    let best_ask = ts.book.best_ask()?;
-    let mid = (best_bid + best_ask) / 2.0;
-    let spread = best_ask - best_bid;
 
-    let stop_threshold = STOP_LOSS_FLOOR.max(2.0 * spread);
-    let unrealized_per = (mid - entry).abs();
-    let losing = (ts.position > 0 && mid < entry) || (ts.position < 0 && mid > entry);
-    let stop_triggered = losing && unrealized_per >= stop_threshold;
+    // The two triggers have genuinely different information needs, so they are
+    // evaluated independently. Collapsing them (the original bug) let the
+    // stop-loss's preconditions silently veto the expiry deadline: the function
+    // read `entry_price?` and `is_valid()` up front and returned early, so
+    // EXPIRY never fired even once in production.
+    //
+    // EXPIRY is a clock deadline. It needs neither an entry price nor a
+    // two-sided book — the market closes regardless of what we know about our
+    // own cost basis or how thin the book has become.
+    let expiry_triggered = expiry_imminent(ts, now_s);
 
-    let expiry_triggered = ts
-        .close_time_s
-        .is_some_and(|close_s| close_s - now_s < EXPIRY_BUFFER_S);
+    // STOP-LOSS is a mark-to-market judgement, so it legitimately requires an
+    // entry price to measure the loss against and a sane two-sided book to
+    // derive a mid from. When either is missing we get no stop — but that must
+    // not suppress expiry.
+    let stop_triggered = stop_loss_triggered(ts);
 
     if !stop_triggered && !expiry_triggered {
         return None;
     }
 
     let reason = if stop_triggered { "STOP-LOSS" } else { "EXPIRY" };
+
+    // Take only the side we actually cross into: a long sells into the bid, a
+    // short buys the ask. Requiring BOTH (via is_valid) was the second half of
+    // the bug — a book that has gone one-sided still lets us out on the side
+    // that remains. If that side is empty there is genuinely no order to send,
+    // and `?` returns None so the caller can report it rather than pretend.
     if ts.position > 0 {
         Some(ExitPlan {
             side: "sell",
-            price_cents: round_dp(best_bid * 100.0, 1),
+            price_cents: round_dp(ts.book.best_bid()? * 100.0, 1),
             size: ts.position,
             reason,
         })
     } else {
         Some(ExitPlan {
             side: "buy",
-            price_cents: round_dp(best_ask * 100.0, 1),
+            price_cents: round_dp(ts.book.best_ask()? * 100.0, 1),
             size: ts.position.abs(),
             reason,
         })
     }
+}
+
+/// True when this market closes within `EXPIRY_BUFFER_S`.
+///
+/// A pure clock check, deliberately independent of the book and of our cost
+/// basis. Public so the caller can distinguish "no exit was needed" from "an
+/// exit was needed and could not be placed" — reporting that difference is the
+/// point, because the original bug presented as total silence.
+pub fn expiry_imminent(ts: &TickerState, now_s: f64) -> bool {
+    ts.close_time_s.is_some_and(|close_s| close_s - now_s < EXPIRY_BUFFER_S)
+}
+
+/// True when the mid has moved against our inventory by more than the stop
+/// threshold. False whenever the inputs for that judgement are unavailable —
+/// no entry price, or no sane two-sided book to take a mid from.
+///
+/// Threshold = max(floor, 2x spread): in a wide market the mid wobbles from one
+/// side refreshing, and exiting on that noise converts a temporary mark into a
+/// realized taker loss.
+fn stop_loss_triggered(ts: &TickerState) -> bool {
+    let Some(entry) = ts.entry_price else {
+        return false;
+    };
+    if !ts.book.is_valid() {
+        return false;
+    }
+    let (Some(best_bid), Some(best_ask)) = (ts.book.best_bid(), ts.book.best_ask()) else {
+        return false;
+    };
+    let mid = (best_bid + best_ask) / 2.0;
+    let spread = best_ask - best_bid;
+
+    let stop_threshold = STOP_LOSS_FLOOR.max(2.0 * spread);
+    let losing = (ts.position > 0 && mid < entry) || (ts.position < 0 && mid > entry);
+    losing && (mid - entry).abs() >= stop_threshold
 }
 
 /// Spot-adverse unwind: the exchange book hasn't re-priced yet, but the
@@ -531,6 +576,114 @@ mod tests {
         assert_eq!(plan.size, 2);
         assert!((plan.price_cents - 42.0).abs() < 1e-9);
         assert_eq!(plan.reason, "EXPIRY");
+    }
+
+    // --- expiry must not be vetoed by stop-loss preconditions -------------
+    //
+    // Regression tests for the bug where EXPIRY could never fire. The old
+    // code read `ts.entry_price?` and checked `book.is_valid()` BEFORE it
+    // computed the expiry flag, so a position with no recorded entry price,
+    // or in a one-sided book, silently rode into settlement. Both conditions
+    // are common exactly when the forced flatten matters most: entry_price is
+    // lost across a restart, and a market whose outcome is decided goes
+    // one-sided as the losing side's bids evaporate.
+
+    /// A position carried across a restart has no entry_price. Expiry is a
+    /// clock deadline and does not care.
+    #[test]
+    fn exit_expiry_fires_without_entry_price() {
+        let mut ts = exit_ts(3, 0.50);
+        ts.entry_price = None;
+        ts.close_time_s = Some(1000.0 + 60.0);
+        let plan = exit_decision(&ts, 1000.0).expect("expiry must fire without entry_price");
+        assert_eq!(plan.reason, "EXPIRY");
+        assert_eq!(plan.side, "sell");
+        assert_eq!(plan.size, 3);
+        assert!((plan.price_cents - 40.0).abs() < 1e-9); // hits the bid
+    }
+
+    /// Long position, YES bids only (no NO side => no ask => !is_valid).
+    /// We only need the side we are crossing into: a bid to sell against.
+    #[test]
+    fn exit_expiry_fires_on_one_sided_book_long() {
+        let mut ts = TickerState::new("X");
+        ts.book.load_snapshot(&json!({"yes": [[0.40, 50]], "no": []}));
+        assert!(!ts.book.is_valid(), "book must be one-sided for this test");
+        ts.position = 2;
+        ts.entry_price = Some(0.50);
+        ts.close_time_s = Some(1000.0 + 60.0);
+        let plan = exit_decision(&ts, 1000.0).expect("expiry must fire on a one-sided book");
+        assert_eq!(plan.reason, "EXPIRY");
+        assert_eq!(plan.side, "sell");
+        assert_eq!(plan.size, 2);
+        assert!((plan.price_cents - 40.0).abs() < 1e-9);
+    }
+
+    /// Short position, NO bids only (no YES side => no bid => !is_valid).
+    /// Covering a short crosses into the ask, which here does exist.
+    #[test]
+    fn exit_expiry_fires_on_one_sided_book_short() {
+        let mut ts = TickerState::new("X");
+        ts.book.load_snapshot(&json!({"yes": [], "no": [[0.58, 40]]}));
+        assert!(!ts.book.is_valid(), "book must be one-sided for this test");
+        ts.position = -2;
+        ts.entry_price = Some(0.45);
+        ts.close_time_s = Some(1000.0 + 60.0);
+        let plan = exit_decision(&ts, 1000.0).expect("expiry must fire on a one-sided book");
+        assert_eq!(plan.reason, "EXPIRY");
+        assert_eq!(plan.side, "buy");
+        assert_eq!(plan.size, 2);
+        assert!((plan.price_cents - 42.0).abs() < 1e-9);
+    }
+
+    /// The one case where expiry genuinely cannot act: nothing to trade
+    /// against on the side we must hit. A long needs a bid; there is none, so
+    /// there is no order to send and the position settles.
+    #[test]
+    fn exit_expiry_none_when_exit_side_has_no_liquidity() {
+        let mut ts = TickerState::new("X");
+        ts.book.load_snapshot(&json!({"yes": [], "no": [[0.58, 40]]}));
+        ts.position = 2; // long needs a BID to sell into; only an ask exists
+        ts.entry_price = Some(0.50);
+        ts.close_time_s = Some(1000.0 + 60.0);
+        assert!(exit_decision(&ts, 1000.0).is_none());
+    }
+
+    /// The expiry deadline is a pure clock question — exposed so the caller can
+    /// tell "nothing to do" apart from "had to flatten but the book was empty",
+    /// which is the silence that hid the original bug for weeks.
+    #[test]
+    fn expiry_imminent_is_a_pure_clock_check() {
+        let mut ts = exit_ts(1, 0.50);
+        ts.close_time_s = Some(1000.0 + 60.0); // inside the 120s buffer
+        assert!(expiry_imminent(&ts, 1000.0));
+        ts.close_time_s = Some(1000.0 + 300.0); // outside it
+        assert!(!expiry_imminent(&ts, 1000.0));
+        ts.close_time_s = None; // unknown close time never triggers
+        assert!(!expiry_imminent(&ts, 1000.0));
+    }
+
+    /// The stop-loss half must stay conservative: it is a mark-to-market
+    /// judgement, so with no entry price there is no loss to measure and it
+    /// must NOT fire. Only expiry is exempt from these preconditions.
+    #[test]
+    fn exit_stop_loss_stays_blind_without_entry_price() {
+        let mut ts = exit_ts(1, 0.50); // deep loss vs mid 0.41 if entry existed
+        ts.entry_price = None;
+        ts.close_time_s = None; // no expiry pressure
+        assert!(exit_decision(&ts, 1000.0).is_none());
+    }
+
+    /// Likewise a one-sided book gives no trustworthy mid, so the stop stays
+    /// blind there too — without expiry, nothing fires.
+    #[test]
+    fn exit_stop_loss_stays_blind_on_one_sided_book() {
+        let mut ts = TickerState::new("X");
+        ts.book.load_snapshot(&json!({"yes": [[0.40, 50]], "no": []}));
+        ts.position = 1;
+        ts.entry_price = Some(0.90); // enormous paper loss
+        ts.close_time_s = None;
+        assert!(exit_decision(&ts, 1000.0).is_none());
     }
 
     #[test]

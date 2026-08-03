@@ -28,7 +28,9 @@ use tracing_subscriber::Layer as _; // per-layer with_filter
 use kalshi_mm::api::{KalshiClient, MarketApi, PROD_BASE_URL};
 use kalshi_mm::book::TakerSide;
 use kalshi_mm::config::{CategoryConfig, Config};
-use kalshi_mm::engine::{check_risk_limits, exit_decision, plan_quotes, spot_unwind_decision};
+use kalshi_mm::engine::{
+    check_risk_limits, exit_decision, expiry_imminent, plan_quotes, spot_unwind_decision,
+};
 use kalshi_mm::features::build_observation;
 use kalshi_mm::ladder::{self, Ladders};
 use kalshi_mm::model::Policy;
@@ -1166,7 +1168,21 @@ impl<M: MarketApi> Trader<M> {
                 continue;
             }
             let ts = &self.state.tickers[&ticker];
-            let Some(plan) = exit_decision(ts, now_s) else { continue };
+            let Some(plan) = exit_decision(ts, now_s) else {
+                // Distinguish "nothing to do" from "we needed out and could
+                // not get out". The latter means the position is about to
+                // settle at whatever the outcome is, which is exactly how the
+                // old exit bug stayed invisible: silence looked like health.
+                // Warn once per pass so it shows up in the container log.
+                if ts.position != 0 && expiry_imminent(ts, now_s) {
+                    warn!(
+                        "EXIT UNAVAILABLE (EXPIRY): {ticker} inv={} — no liquidity on the \
+                         exit side; position will settle",
+                        ts.position
+                    );
+                }
+                continue;
+            };
             let mid = ts.book.mid().unwrap_or(0.0);
             let entry = ts.entry_price.unwrap_or(mid);
             info!("EXIT ({}): {ticker} inv={} entry={entry:.3} mid={mid:.3} unrealized={:+.4}",
