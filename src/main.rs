@@ -29,7 +29,8 @@ use kalshi_mm::api::{KalshiClient, MarketApi, PROD_BASE_URL};
 use kalshi_mm::book::TakerSide;
 use kalshi_mm::config::{CategoryConfig, Config};
 use kalshi_mm::engine::{
-    check_risk_limits, exit_block, exit_decision, plan_quotes, spot_unwind_decision, ExitBlock,
+    check_risk_limits, exit_block, exit_decision, exit_retry_delay_s, market_closed,
+    plan_quotes, spot_unwind_decision, ExitBlock,
 };
 use kalshi_mm::features::build_observation;
 use kalshi_mm::ladder::{self, Ladders};
@@ -188,6 +189,8 @@ struct Trader<M: MarketApi> {
     /// ticker -> how many syncs a vanished position has waited for its
     /// settlement record (the settlements feed can lag the positions feed).
     settlement_checks: HashMap<String, u32>,
+    /// ticker -> exit retry backoff + stuck detection. Reaped when flat.
+    exit_retries: HashMap<String, ExitRetry>,
     /// Publishes the tradeable universe to the WebSocket task after a refresh
     /// so it can subscribe to newly-opened markets. None when running without
     /// a WebSocket (REST polling / no credentials).
@@ -197,6 +200,24 @@ struct Trader<M: MarketApi> {
 /// Give a vanished position this many sync cycles (30s each) to show up in
 /// /portfolio/settlements before falling back to plain drift-zeroing.
 const MAX_SETTLEMENT_CHECKS: u32 = 4;
+
+/// Consecutive exit attempts that change nothing before we call a position
+/// STUCK and say so. Two attempts can be ordinary bad luck on a thin book;
+/// by the third the displayed liquidity is very likely phantom.
+const EXIT_STUCK_ATTEMPTS: u32 = 3;
+
+/// Per-ticker exit retry bookkeeping. Exists because an accepted IOC that
+/// crosses a phantom bid fills nothing and reports no error — indistinguishable
+/// from success unless we track whether the position actually moved.
+#[derive(Debug, Clone, Copy)]
+struct ExitRetry {
+    /// Consecutive attempts that have left the position unchanged.
+    attempts: u32,
+    /// Position as of the last attempt, to detect whether it moved.
+    position_at_attempt: i64,
+    /// Monotonic time before which no further attempt is sent.
+    next_allowed_mono: f64,
+}
 
 /// How often to re-discover open markets. Hourly series (KXBTCD) expire and
 /// reopen continuously; without a refresh the bot's universe is frozen at boot
@@ -233,6 +254,7 @@ async fn run_trader<M: MarketApi>(
         spot_unwind_next: HashMap::new(),
         spot_unwind_fired_until: HashMap::new(),
         settlement_checks: HashMap::new(),
+        exit_retries: HashMap::new(),
         universe_tx: None,
     };
 
@@ -1158,6 +1180,10 @@ impl<M: MarketApi> Trader<M> {
             .filter(|(_, ts)| ts.position != 0)
             .map(|(t, _)| t.clone())
             .collect();
+        // Reap retry state for anything now flat, so a later position in the
+        // same ticker starts from a clean backoff rather than inheriting one.
+        let held: HashSet<&String> = tickers.iter().collect();
+        self.exit_retries.retain(|t, _| held.contains(t));
         for ticker in tickers {
             // A spot unwind IOC may be filled-but-unbooked (5s fills poll):
             // firing the mid-based stop inside the holdoff would double-exit
@@ -1193,10 +1219,51 @@ impl<M: MarketApi> Trader<M> {
                 }
                 continue;
             };
+            // Past the close an order can no longer do anything — the position
+            // settles regardless. Before this check a stuck exit kept firing
+            // for ~3 minutes into a dead market.
+            if market_closed(ts, now_s) {
+                continue;
+            }
+
+            // An accepted IOC that crosses a phantom bid fills nothing and
+            // reports no error, so "did the position actually move?" is the
+            // only reliable success signal. Unchanged position => still stuck.
+            let position = ts.position;
+            let retry = self.exit_retries.entry(ticker.clone()).or_insert(ExitRetry {
+                attempts: 0,
+                position_at_attempt: position,
+                next_allowed_mono: f64::NEG_INFINITY,
+            });
+            if retry.position_at_attempt != position {
+                // It moved — partial or full fill. Reset the ladder.
+                retry.attempts = 0;
+                retry.position_at_attempt = position;
+                retry.next_allowed_mono = f64::NEG_INFINITY;
+            }
+            if mono_now() < retry.next_allowed_mono {
+                continue; // inside the backoff; stay quiet
+            }
+            retry.attempts += 1;
+            retry.position_at_attempt = position;
+            retry.next_allowed_mono = mono_now() + exit_retry_delay_s(retry.attempts);
+            let attempts = retry.attempts;
+
             let mid = ts.book.mid().unwrap_or(0.0);
             let entry = ts.entry_price.unwrap_or(mid);
-            info!("EXIT ({}): {ticker} inv={} entry={entry:.3} mid={mid:.3} unrealized={:+.4}",
-                  plan.reason, ts.position, ts.position as f64 * (mid - entry));
+            info!("EXIT ({}): {ticker} inv={position} entry={entry:.3} mid={mid:.3} unrealized={:+.4}",
+                  plan.reason, position as f64 * (mid - entry));
+            // Repeated attempts that change nothing mean the displayed
+            // liquidity is phantom. Say so — an exit that is placed but never
+            // fills used to look identical to one that worked.
+            if attempts >= EXIT_STUCK_ATTEMPTS {
+                warn!(
+                    "EXIT STUCK ({}): {ticker} inv={position} — {attempts} attempts, position \
+                     unchanged; quoted liquidity is not filling and it will settle unless it \
+                     returns before close",
+                    plan.reason
+                );
+            }
             let category = self.active_tickers.get(&ticker).cloned()
                 .unwrap_or_else(|| "UNKNOWN".to_string());
             executor::apply_exit_plan(&self.api, &category, &ticker, &plan).await;
@@ -1253,7 +1320,20 @@ impl<M: MarketApi> Trader<M> {
         if open > 0 {
             let now_s = epoch_now();
             let (mut settling, mut no_entry, mut one_sided, mut healthy) = (0, 0, 0, 0);
-            for ts in s.tickers.values().filter(|ts| ts.position != 0) {
+            let mut stuck = 0;
+            for (ticker, ts) in s.tickers.iter().filter(|(_, ts)| ts.position != 0) {
+                // Checked BEFORE exit_block: a stuck position is one where an
+                // exit WAS placed, so exit_block sees nothing wrong and would
+                // otherwise count it as healthy — the blind spot that hid a
+                // position sending 30 unfilled IOCs.
+                if self
+                    .exit_retries
+                    .get(ticker)
+                    .is_some_and(|r| r.attempts >= EXIT_STUCK_ATTEMPTS)
+                {
+                    stuck += 1;
+                    continue;
+                }
                 match exit_block(ts, now_s) {
                     Some(ExitBlock::NoExitLiquidity) => settling += 1,
                     Some(ExitBlock::NoEntryPrice) => no_entry += 1,
@@ -1261,8 +1341,9 @@ impl<M: MarketApi> Trader<M> {
                     _ => healthy += 1,
                 }
             }
-            info!("Exit readiness: {healthy} ok | {settling} SETTLING (no exit liquidity) \
-                   | {no_entry} no entry price | {one_sided} one-sided book");
+            info!("Exit readiness: {healthy} ok | {stuck} STUCK (placed, not filling) \
+                   | {settling} SETTLING (no exit liquidity) | {no_entry} no entry price \
+                   | {one_sided} one-sided book");
         }
         // Spot-feed health: a connected-but-silent feed gates all spot-bound
         // quoting with no other log signal — this line is the 3am diagnostic
@@ -1459,6 +1540,7 @@ mod tests {
     struct MockApi {
         pages: Mutex<Vec<Vec<String>>>,
         call: std::sync::atomic::AtomicUsize,
+        orders_placed: std::sync::atomic::AtomicUsize,
     }
 
     impl MockApi {
@@ -1468,6 +1550,7 @@ mod tests {
                     pages.iter().map(|p| p.iter().map(|t| t.to_string()).collect()).collect(),
                 ),
                 call: std::sync::atomic::AtomicUsize::new(0),
+                orders_placed: std::sync::atomic::AtomicUsize::new(0),
             }
         }
     }
@@ -1476,6 +1559,8 @@ mod tests {
         async fn place_limit_order(
             &self, _t: &str, _s: &str, _p: f64, _n: i64, _po: bool, _tif: &str,
         ) -> Result<Value, ApiError> {
+            // Orders never fill here — the phantom-bid case we're pinning.
+            self.orders_placed.fetch_add(1, Ordering::Relaxed);
             Ok(json!({}))
         }
         async fn cancel_order(&self, _id: &str) -> Result<Value, ApiError> {
@@ -1553,6 +1638,7 @@ mod tests {
             spot_unwind_next: HashMap::new(),
             spot_unwind_fired_until: HashMap::new(),
             settlement_checks: HashMap::new(),
+            exit_retries: HashMap::new(),
             universe_tx: None,
             cfg,
         })
@@ -1609,6 +1695,71 @@ mod tests {
             "expired ticker with an open position must be retained"
         );
         assert!(trader.active_tickers.contains_key("KXBTCD-26AUG0317-T72499.99"));
+    }
+
+    // --- exit retry backoff / stuck visibility ----------------------------
+    // Regression for 2026-08-04 04:00Z: a long fired an identical
+    // `sell 3 @ 36c IOC` every 10s for 5 minutes against a phantom bid — 30
+    // orders, none filling — and kept going ~3 min past the market close.
+
+    /// Trader holding one long that can never exit: the book shows a bid (so a
+    /// plan IS produced) but the mock never fills, mimicking a phantom bid.
+    /// `close_in_s` positions the market relative to now.
+    fn stuck_position_trader(close_in_s: f64) -> Option<Trader<MockApi>> {
+        let mut trader = mock_trader(MockApi::new(vec![vec!["KXBTCD-T1"]]))?;
+        trader.active_tickers.insert("KXBTCD-T1".to_string(), "KXBTCD".to_string());
+        let ts = trader.state.ticker("KXBTCD-T1", "KXBTCD");
+        // Bid only — one-sided, exactly the shape seen in production.
+        ts.book.load_snapshot(&json!({"yes": [[0.36, 10]], "no": []}));
+        ts.position = 3;
+        ts.entry_price = Some(0.17);
+        ts.close_time_s = Some(epoch_now() + close_in_s);
+        Some(trader)
+    }
+
+    #[tokio::test]
+    async fn exit_retry_backs_off_instead_of_spamming() {
+        // Inside the expiry window. Ten immediate passes (what the 10s timer
+        // would do over ~100s) must NOT produce ten orders: the first goes out
+        // at once, the rest are held off by the backoff.
+        let Some(mut trader) = stuck_position_trader(60.0) else { return };
+        for _ in 0..10 {
+            trader.check_exits().await;
+        }
+        let placed = trader.api.orders_placed.load(Ordering::Relaxed);
+        assert_eq!(placed, 1, "expected one order, backoff suppressed the rest; got {placed}");
+        // The position is still held and still counted as stuck.
+        assert_eq!(trader.state.tickers["KXBTCD-T1"].position, 3);
+        assert!(trader.exit_retries.contains_key("KXBTCD-T1"));
+    }
+
+    #[tokio::test]
+    async fn exit_stops_once_the_market_has_closed() {
+        // Past the close: an order can no longer accomplish anything, so we
+        // must send none at all rather than keep firing into a dead market.
+        let Some(mut trader) = stuck_position_trader(-30.0) else { return };
+        for _ in 0..5 {
+            trader.check_exits().await;
+        }
+        assert_eq!(
+            trader.api.orders_placed.load(Ordering::Relaxed), 0,
+            "no orders may be sent after the market closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn exit_retry_state_clears_when_the_position_goes_flat() {
+        // Bookkeeping must not leak: once flat, the ticker's retry entry is
+        // dropped so a later position starts from a clean backoff.
+        let Some(mut trader) = stuck_position_trader(60.0) else { return };
+        trader.check_exits().await;
+        assert!(trader.exit_retries.contains_key("KXBTCD-T1"));
+        trader.state.ticker("KXBTCD-T1", "KXBTCD").position = 0;
+        trader.check_exits().await;
+        assert!(
+            !trader.exit_retries.contains_key("KXBTCD-T1"),
+            "retry state for a flat ticker must be reaped"
+        );
     }
 
     #[tokio::test]

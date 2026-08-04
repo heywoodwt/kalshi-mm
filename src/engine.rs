@@ -302,6 +302,38 @@ pub fn exit_block(ts: &TickerState, now_s: f64) -> Option<ExitBlock> {
     Some(ExitBlock::WithinThreshold)
 }
 
+/// Backoff floor and ceiling for re-attempting an exit that isn't filling.
+pub const EXIT_RETRY_BASE_S: f64 = 10.0;
+pub const EXIT_RETRY_MAX_S: f64 = 60.0;
+
+/// How long to wait before re-sending an exit that failed to change the
+/// position, given how many consecutive attempts have already been made.
+///
+/// Zero for the first attempt — an exit inside the 120s expiry window must not
+/// be delayed — then doubling to a cap. A displayed bid can be phantom: the
+/// order is accepted, crosses nothing, and fills nothing, so retrying every
+/// 10s just burns rate limit. Capping (rather than giving up) keeps a slow
+/// heartbeat in case liquidity comes back before the close.
+pub fn exit_retry_delay_s(consecutive_attempts: u32) -> f64 {
+    if consecutive_attempts == 0 {
+        return 0.0;
+    }
+    let doubled = EXIT_RETRY_BASE_S * 2f64.powi(consecutive_attempts as i32 - 1);
+    doubled.min(EXIT_RETRY_MAX_S)
+}
+
+/// True once the market's close time has passed.
+///
+/// Separate from `expiry_imminent` on purpose: "an exit is due" and "an order
+/// could still accomplish something" are different questions. After the close
+/// the position settles no matter what we send, so the caller stops sending —
+/// a stuck exit kept firing for ~3 minutes past the close before this existed.
+/// An unknown close time is never treated as closed; withholding a timestamp
+/// must not stop us trying to get out.
+pub fn market_closed(ts: &TickerState, now_s: f64) -> bool {
+    ts.close_time_s.is_some_and(|close_s| now_s >= close_s)
+}
+
 /// True when this market closes within `EXPIRY_BUFFER_S`.
 ///
 /// A pure clock check, deliberately independent of the book and of our cost
@@ -771,6 +803,62 @@ mod tests {
         ts.close_time_s = Some(1000.0 + 60.0);
         assert!(exit_decision(&ts, 1000.0).is_none());
         assert_eq!(exit_block(&ts, 1000.0), Some(ExitBlock::NoExitLiquidity));
+    }
+
+    // --- exit retry backoff ----------------------------------------------
+    // Observed 2026-08-04 04:00Z: a long fired `sell 3 @ 36c IOC` every 10s
+    // for 5 minutes (30 identical orders) against a phantom bid, and kept
+    // going ~3 min PAST the close. Backoff bounds the spam; `market_closed`
+    // stops it dead once an order can no longer achieve anything.
+
+    #[test]
+    fn exit_retry_delay_backs_off_then_caps() {
+        // First attempt is immediate — an exit inside the 120s window must not
+        // be delayed by bookkeeping.
+        assert_eq!(exit_retry_delay_s(0), 0.0);
+        // Then doubling, so a genuinely stuck position stops hammering.
+        assert_eq!(exit_retry_delay_s(1), 10.0);
+        assert_eq!(exit_retry_delay_s(2), 20.0);
+        assert_eq!(exit_retry_delay_s(3), 40.0);
+        // Capped, so it keeps trying periodically in case liquidity returns.
+        assert_eq!(exit_retry_delay_s(4), EXIT_RETRY_MAX_S);
+        assert_eq!(exit_retry_delay_s(50), EXIT_RETRY_MAX_S);
+    }
+
+    #[test]
+    fn exit_retry_delay_over_the_window_sends_few_orders() {
+        // Property that matters: across the whole 120s expiry window the
+        // schedule must cost a handful of orders, not one per 10s tick.
+        let mut t = 0.0;
+        let mut sent = 0;
+        while t < EXPIRY_BUFFER_S {
+            sent += 1;
+            t += exit_retry_delay_s(sent);
+        }
+        assert!(sent <= 6, "expected a handful of attempts, got {sent}");
+    }
+
+    #[test]
+    fn market_closed_is_false_before_close_and_true_after() {
+        let mut ts = exit_ts(1, 0.50);
+        ts.close_time_s = Some(1000.0);
+        assert!(!market_closed(&ts, 999.0), "still open one second before close");
+        assert!(market_closed(&ts, 1000.0), "closed exactly at close time");
+        assert!(market_closed(&ts, 1200.0), "still closed later");
+        // Unknown close time is never treated as closed — we must not stop
+        // trying to exit a position just because the API withheld a timestamp.
+        ts.close_time_s = None;
+        assert!(!market_closed(&ts, 1200.0));
+    }
+
+    #[test]
+    fn expiry_imminent_stays_true_after_close() {
+        // Deliberate: `market_closed` is the separate, explicit gate. Keeping
+        // expiry_imminent a pure "within buffer" check means exit_block still
+        // classifies a post-close stuck position as needing an exit.
+        let mut ts = exit_ts(1, 0.50);
+        ts.close_time_s = Some(1000.0);
+        assert!(expiry_imminent(&ts, 1500.0));
     }
 
     #[test]
