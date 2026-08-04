@@ -20,7 +20,7 @@ use clap::Parser;
 use fs2::FileExt;
 use serde_json::Value;
 use tokio::sync::{mpsc, watch};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::Layer as _; // per-layer with_filter
@@ -29,7 +29,7 @@ use kalshi_mm::api::{KalshiClient, MarketApi, PROD_BASE_URL};
 use kalshi_mm::book::TakerSide;
 use kalshi_mm::config::{CategoryConfig, Config};
 use kalshi_mm::engine::{
-    check_risk_limits, exit_decision, expiry_imminent, plan_quotes, spot_unwind_decision,
+    check_risk_limits, exit_block, exit_decision, plan_quotes, spot_unwind_decision, ExitBlock,
 };
 use kalshi_mm::features::build_observation;
 use kalshi_mm::ladder::{self, Ladders};
@@ -1169,17 +1169,27 @@ impl<M: MarketApi> Trader<M> {
             }
             let ts = &self.state.tickers[&ticker];
             let Some(plan) = exit_decision(ts, now_s) else {
-                // Distinguish "nothing to do" from "we needed out and could
-                // not get out". The latter means the position is about to
-                // settle at whatever the outcome is, which is exactly how the
-                // old exit bug stayed invisible: silence looked like health.
-                // Warn once per pass so it shows up in the container log.
-                if ts.position != 0 && expiry_imminent(ts, now_s) {
-                    warn!(
-                        "EXIT UNAVAILABLE (EXPIRY): {ticker} inv={} — no liquidity on the \
-                         exit side; position will settle",
+                // Name the reason instead of returning silently. The old exit
+                // bug was invisible precisely because "no exit" and "no
+                // problem" produced identical logs — nothing.
+                match exit_block(ts, now_s) {
+                    // An exit was DUE and could not be placed: this position
+                    // is going to settle at whatever the outcome is. Warn on
+                    // every pass — this is the case that quietly cost money.
+                    Some(ExitBlock::NoExitLiquidity) => warn!(
+                        "EXIT UNAVAILABLE: {ticker} inv={} — no liquidity on the exit \
+                         side; position will settle",
                         ts.position
-                    );
+                    ),
+                    // Chronic, and typically true for many positions at once
+                    // (every open position, re-checked every 10s, would flood
+                    // the log), so these stay at debug. The hourly summary
+                    // carries the standing tally instead.
+                    Some(reason @ (ExitBlock::NoEntryPrice | ExitBlock::BookOneSided)) => {
+                        debug!("EXIT BLOCKED ({reason:?}): {ticker} inv={}", ts.position)
+                    }
+                    // Nothing is wrong: no trigger fired.
+                    Some(ExitBlock::WithinThreshold) | None => {}
                 }
                 continue;
             };
@@ -1235,6 +1245,25 @@ impl<M: MarketApi> Trader<M> {
               s.fees_paid, s.wins, s.losses, s.win_rate() * 100.0);
         info!("Daily PnL: ${:.2} | Cumulative PnL: ${:.2} | Positions open: {open}",
               s.daily_pnl, s.cumulative_pnl);
+        // Exit readiness: WHY the open positions aren't exiting right now.
+        // The exit path was once silently dead — every position rode to
+        // settlement with no log line anywhere — so this reports the standing
+        // reasons at INFO without the per-pass flood that per-ticker logging
+        // would produce. "settling" is the one to act on.
+        if open > 0 {
+            let now_s = epoch_now();
+            let (mut settling, mut no_entry, mut one_sided, mut healthy) = (0, 0, 0, 0);
+            for ts in s.tickers.values().filter(|ts| ts.position != 0) {
+                match exit_block(ts, now_s) {
+                    Some(ExitBlock::NoExitLiquidity) => settling += 1,
+                    Some(ExitBlock::NoEntryPrice) => no_entry += 1,
+                    Some(ExitBlock::BookOneSided) => one_sided += 1,
+                    _ => healthy += 1,
+                }
+            }
+            info!("Exit readiness: {healthy} ok | {settling} SETTLING (no exit liquidity) \
+                   | {no_entry} no entry price | {one_sided} one-sided book");
+        }
         // Spot-feed health: a connected-but-silent feed gates all spot-bound
         // quoting with no other log signal — this line is the 3am diagnostic
         if !self.spot_bound.is_empty() {

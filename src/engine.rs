@@ -254,6 +254,54 @@ pub fn exit_decision(ts: &TickerState, now_s: f64) -> Option<ExitPlan> {
     }
 }
 
+/// Why `exit_decision` produced no order for a position we still hold.
+///
+/// Exists because the original exit bug presented as total silence — no exit
+/// and no log, with no way to tell which precondition had vetoed it short of
+/// an autopsy on live state. Naming the reason makes a stuck position
+/// attributable straight from the container log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitBlock {
+    /// An exit is DUE (expiry) but the side we must cross into is empty, so
+    /// there is no order to send and the position will settle. The urgent one.
+    NoExitLiquidity,
+    /// No stop-loss judgement possible: we never learned our cost basis
+    /// (e.g. an entry-price backfill that failed and was never retried).
+    NoEntryPrice,
+    /// No stop-loss judgement possible: the book isn't two-sided, so there is
+    /// no mid to mark against. Not fatal on its own — a long can still exit
+    /// into a surviving bid.
+    BookOneSided,
+    /// Everything was evaluable; the mark simply isn't past the stop
+    /// threshold. The ordinary quiet case — not a problem.
+    WithinThreshold,
+}
+
+/// Explain why no exit order was produced. `None` means there is nothing to
+/// explain: either a plan WAS produced, or the position is flat.
+///
+/// Reasons are ordered by urgency, not by evaluation order: a due-but-
+/// unplaceable exit outranks a missing cost basis, which outranks a one-sided
+/// book, which outranks "nothing was wrong". Shares `expiry_imminent` and
+/// `stop_loss_triggered` with `exit_decision` so the two cannot drift apart —
+/// `exit_block_is_none_when_a_plan_is_produced` pins that agreement.
+pub fn exit_block(ts: &TickerState, now_s: f64) -> Option<ExitBlock> {
+    if ts.position == 0 || exit_decision(ts, now_s).is_some() {
+        return None;
+    }
+    // A trigger fired but no plan came back => the crossing side was empty.
+    if expiry_imminent(ts, now_s) || stop_loss_triggered(ts) {
+        return Some(ExitBlock::NoExitLiquidity);
+    }
+    if ts.entry_price.is_none() {
+        return Some(ExitBlock::NoEntryPrice);
+    }
+    if !ts.book.is_valid() {
+        return Some(ExitBlock::BookOneSided);
+    }
+    Some(ExitBlock::WithinThreshold)
+}
+
 /// True when this market closes within `EXPIRY_BUFFER_S`.
 ///
 /// A pure clock check, deliberately independent of the book and of our cost
@@ -661,6 +709,76 @@ mod tests {
         assert!(!expiry_imminent(&ts, 1000.0));
         ts.close_time_s = None; // unknown close time never triggers
         assert!(!expiry_imminent(&ts, 1000.0));
+    }
+
+    // --- exit bail reasons -----------------------------------------------
+    // The original exit bug presented as TOTAL SILENCE: no exit, no log, no
+    // way to tell which precondition had vetoed it. `exit_block` names the
+    // reason so a position that fails to exit is attributable from the log
+    // instead of requiring a live-state autopsy.
+
+    /// A book with only one side: bids present, asks absent (or vice versa).
+    fn one_sided_ts(position: i64) -> TickerState {
+        let mut ts = TickerState::new("X");
+        // "yes" bids only — nothing on the ask side to buy back into.
+        ts.book.load_snapshot(&json!({"yes": [[0.40, 50]], "no": []}));
+        ts.position = position;
+        ts.entry_price = Some(0.50);
+        ts
+    }
+
+    #[test]
+    fn exit_block_is_none_when_a_plan_is_produced() {
+        // Agreement property: whenever exit_decision yields a plan there is by
+        // definition nothing blocking, so the two must never disagree.
+        let ts = exit_ts(1, 0.50); // losing long, stop fires
+        assert!(exit_decision(&ts, 1000.0).is_some());
+        assert_eq!(exit_block(&ts, 1000.0), None);
+    }
+
+    #[test]
+    fn exit_block_reports_within_threshold() {
+        // Everything evaluable, the mark just isn't past the stop. This is the
+        // ordinary quiet case — the caller must NOT treat it as a problem.
+        let ts = exit_ts(1, 0.42); // barely losing, inside threshold
+        assert!(exit_decision(&ts, 1000.0).is_none());
+        assert_eq!(exit_block(&ts, 1000.0), Some(ExitBlock::WithinThreshold));
+    }
+
+    #[test]
+    fn exit_block_reports_missing_entry_price() {
+        // Cost basis never learned (e.g. the 429 backfill failures), so no
+        // stop judgement is possible. Distinct from "not losing enough".
+        let mut ts = exit_ts(1, 0.50);
+        ts.entry_price = None;
+        assert_eq!(exit_block(&ts, 1000.0), Some(ExitBlock::NoEntryPrice));
+    }
+
+    #[test]
+    fn exit_block_reports_one_sided_book() {
+        // Book has no ask, so no mid and no stop judgement — but note this
+        // alone is NOT fatal for a long, which exits into the bid.
+        let ts = one_sided_ts(1);
+        assert_eq!(exit_block(&ts, 1000.0), Some(ExitBlock::BookOneSided));
+    }
+
+    #[test]
+    fn exit_block_reports_no_exit_liquidity_at_expiry() {
+        // The case that actually cost money: expiry is due and the side we
+        // must cross into is empty, so the position WILL settle. Outranks the
+        // other reasons — it is the urgent one.
+        let mut ts = one_sided_ts(-1); // short: needs an ask, there is none
+        ts.close_time_s = Some(1000.0 + 60.0);
+        assert!(exit_decision(&ts, 1000.0).is_none());
+        assert_eq!(exit_block(&ts, 1000.0), Some(ExitBlock::NoExitLiquidity));
+    }
+
+    #[test]
+    fn exit_block_ignores_flat_positions() {
+        // Nothing held, nothing to explain.
+        let mut ts = exit_ts(0, 0.50);
+        ts.position = 0;
+        assert_eq!(exit_block(&ts, 1000.0), None);
     }
 
     /// The stop-loss half must stay conservative: it is a mark-to-market
