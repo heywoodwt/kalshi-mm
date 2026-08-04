@@ -453,7 +453,6 @@ impl TraderState {
         }
         let position = ts.position;
         let entry = ts.entry_price;
-        let closing_carried = ts.carried;
         ts.position = 0;
         ts.entry_price = None;
         ts.carried = false;
@@ -464,7 +463,11 @@ impl TraderState {
         let realized = position as f64 * (settle_value - entry);
         let category = ts.category.clone();
         ts.realized_pnl += realized;
-        self.book_realized_close(category, realized, closing_carried);
+        // Settlements are ALWAYS streak-exempt, carried or not — they arrive
+        // in simultaneous batches, so counting them as "consecutive" halts the
+        // category on a single expiring hour. (This subsumes the older
+        // carried-only exemption on this path.)
+        self.book_realized_close(category, realized, true);
         Some(realized)
     }
 
@@ -472,11 +475,26 @@ impl TraderState {
     /// account counters: daily/cumulative PnL, win/loss tally, and the
     /// per-category consecutive-loss streak the kill switch reads. Shared so
     /// the two close paths can't drift apart. No-op at exactly zero (a
-    /// scratch close is neither a win nor a loss). `carried` closes (see
-    /// TickerState::carried) book PnL and tallies but leave the streak
-    /// untouched in BOTH directions — old-era outcomes neither halt nor
-    /// absolve the live strategy.
-    fn book_realized_close(&mut self, category: String, realized: f64, carried: bool) {
+    /// scratch close is neither a win nor a loss).
+    ///
+    /// `streak_exempt` closes book PnL and tallies but leave the streak
+    /// untouched in BOTH directions — such outcomes neither halt nor absolve
+    /// the live strategy. Two kinds are exempt:
+    ///
+    /// - **carried** closes (see `TickerState::carried`): inventory inherited
+    ///   across a restart, so the outcome belongs to a previous era.
+    /// - **settlements**: an expiry is not a trading decision, and settlements
+    ///   for one expiring hour arrive as a simultaneous batch. On 2026-08-04 a
+    ///   six-settlement batch containing three losses read as "3 consecutive
+    ///   losses" and halted KXBTCD for ~15 hours. "Consecutive" is meaningless
+    ///   for events that share a millisecond.
+    ///
+    /// The cost of exempting settlements: a position that only ever loses by
+    /// expiring worthless no longer feeds this breaker. That is deliberate —
+    /// this counter exists to catch a run of bad *quoting* decisions, and
+    /// `max_daily_loss` remains the PnL-based backstop that catches bleeding
+    /// regardless of which path realized it.
+    fn book_realized_close(&mut self, category: String, realized: f64, streak_exempt: bool) {
         if realized == 0.0 {
             return;
         }
@@ -484,12 +502,12 @@ impl TraderState {
         self.cumulative_pnl += realized;
         if realized > 0.0 {
             self.wins += 1;
-            if !carried {
+            if !streak_exempt {
                 self.consecutive_losses.insert(category, 0);
             }
         } else {
             self.losses += 1;
-            if !carried {
+            if !streak_exempt {
                 *self.consecutive_losses.entry(category).or_insert(0) += 1;
             }
         }
@@ -808,7 +826,10 @@ mod tests {
         // 0.21 payout minus the $0.01 maker fee booked on the fill
         assert!((s.daily_pnl - 0.20).abs() < 1e-9);
         assert!((s.cumulative_pnl - 0.20).abs() < 1e-9);
-        assert_eq!(s.consecutive_losses.get("KXADP").copied(), Some(0));
+        // The streak is untouched rather than reset to 0: settlements are
+        // exempt in both directions, so the entry is never created. See
+        // settlement_wins_do_not_reset_the_streak.
+        assert_eq!(s.consecutive_losses.get("KXADP").copied().unwrap_or(0), 0);
     }
 
     #[test]
@@ -826,16 +847,70 @@ mod tests {
     }
 
     #[test]
-    fn settlement_books_short_run_over_as_loss_feeding_kill_switch() {
+    fn settlement_books_short_run_over_as_loss_but_not_the_streak() {
         // Short 2 @ 0.232 settles yes -> pay $1 each: -2 * (1 - 0.232)
         let mut s = TraderState::new(0.0);
         apply(&mut s, &fill_json("sell", "yes", 0.232, 2.0, false, "s"));
         let realized = s.apply_settlement("KXADP-26JUL-T0", Some(true));
         assert!((realized.unwrap() - (-1.536)).abs() < 1e-9);
+        // PnL and the win/loss tally still book — only the streak is exempt.
         assert_eq!((s.wins, s.losses), (0, 1));
-        // Settlement losses must feed the same per-category streak the
-        // fill-based kill switch reads, or expiring losers evade it
-        assert_eq!(s.consecutive_losses.get("KXADP").copied(), Some(1));
+        assert!((s.daily_pnl - (-1.536 - fill_fee(MAKER, 2, 0.232))).abs() < 1e-9);
+        assert_eq!(s.consecutive_losses.get("KXADP").copied().unwrap_or(0), 0);
+    }
+
+    /// The 2026-08-04 outage: six settlements for one expiring hour landed in
+    /// a single millisecond batch, three of them losses, which read as "3
+    /// consecutive losses" and halted KXBTCD for ~15 hours. Settlements are
+    /// simultaneous, so "consecutive" is not a meaningful notion for them —
+    /// the streak counts sequential TRADING decisions, and an expiry is not
+    /// a decision.
+    #[test]
+    fn a_batch_of_settlement_losses_cannot_trip_the_kill_switch() {
+        let mut s = TraderState::new(0.0);
+        for i in 0..3 {
+            let t = format!("KXBTCD-26AUG0400-T{i}");
+            s.ticker(&t, "KXBTCD");
+            let ts = s.tickers.get_mut(&t).unwrap();
+            ts.position = 1;
+            ts.entry_price = Some(0.40);
+            // Long @ 0.40 settling NO loses the full 0.40 -> three losses.
+            assert!((s.apply_settlement(&t, Some(false)).unwrap() + 0.40).abs() < 1e-9);
+        }
+        assert_eq!(s.losses, 3, "all three still book as losses");
+        assert_eq!(
+            s.consecutive_losses.get("KXBTCD").copied().unwrap_or(0),
+            0,
+            "settlement losses must not feed the consecutive-loss streak"
+        );
+    }
+
+    /// Symmetric with the `carried` exemption: if settlements cannot halt the
+    /// strategy they must not absolve it either, or a lucky expiry would wipe
+    /// out a genuine run of bad trading decisions.
+    #[test]
+    fn settlement_wins_do_not_reset_the_streak() {
+        let mut s = TraderState::new(0.0);
+        s.consecutive_losses.insert("KXADP".to_string(), 2);
+        s.ticker("KXADP-26JUL-T0", "KXADP");
+        let ts = s.tickers.get_mut("KXADP-26JUL-T0").unwrap();
+        ts.position = 1;
+        ts.entry_price = Some(0.30);
+        assert!((s.apply_settlement("KXADP-26JUL-T0", Some(true)).unwrap() - 0.70).abs() < 1e-9);
+        assert_eq!(s.wins, 1, "still books as a win");
+        assert_eq!(s.consecutive_losses.get("KXADP").copied(), Some(2));
+    }
+
+    /// The switch must still do its actual job: real round-trip losses from
+    /// this process's own fills still halt the category.
+    #[test]
+    fn fill_based_losses_still_feed_the_streak() {
+        let mut s = TraderState::new(0.0);
+        for i in 0..3 {
+            apply(&mut s, &fill_json("buy", "yes", 0.50, 1.0, false, &format!("b{i}")));
+            apply(&mut s, &fill_json("sell", "yes", 0.40, 1.0, false, &format!("s{i}")));
+        }
+        assert_eq!(s.consecutive_losses.get("KXADP").copied(), Some(3));
     }
 
     #[test]
