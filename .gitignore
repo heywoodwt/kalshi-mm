@@ -16,3 +16,6 @@ target/
 # not code) — the RL retrain consumes these on the HPC. NEVER commit.
 real_fills.jsonl
 real_settlements.jsonl
+
+.idea/
+.DS_Store

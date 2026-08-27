@@ -314,3 +314,7 @@ orders) but has not yet been run live with real money. CI
 (`.github/workflows/release.yml` -> GHCR), and deployment scripts
 (`deploy/aws_deploy.sh`) exist but neither the AWS deployment nor a live
 run has been executed.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

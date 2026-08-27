@@ -1,6 +1,7 @@
 //! kalshi-mm: Rust port of the live market-making bot
-//! (`rl_bot/live_trader_v2.py`). Behavior contract:
-//! docs/superpowers/specs/2026-07-09-rust-live-bot-design.md.
+//! (`rl_bot/live_trader_v2.py`). The behavior contract this port must
+//! satisfy is described in the README ("Parity testing") and enforced by
+//! the golden-fixture tests in `tests/parity.rs`.
 //!
 //! Concurrency model: ONE event loop owns all trading state (no locks) —
 //! the same single-threaded semantics as Python's asyncio. The WebSocket
