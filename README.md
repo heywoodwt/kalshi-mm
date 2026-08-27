@@ -309,8 +309,7 @@ Pulling requires a GitHub token with `read:packages`
 
 The bot has been smoke-tested in paper mode against live market data
 (connects, discovers all markets, plans sane quotes, places simulated
-orders) but has not yet been run live with real money. CI
+orders) and has been run live with real money. CI
 (`.github/workflows/ci.yml`), the release/packaging workflow
 (`.github/workflows/release.yml` -> GHCR), and deployment scripts
-(`deploy/aws_deploy.sh`) exist but neither the AWS deployment nor a live
-run has been executed.
+(`deploy/aws_deploy.sh`) and has been deployed on AWS.
